@@ -18,6 +18,9 @@ from matplotlib.ticker import FuncFormatter
 
 np.set_printoptions(threshold=np.inf)
 
+
+
+# TESTING GUI
 class RawHandler(FileSystemEventHandler):
 
     '''
