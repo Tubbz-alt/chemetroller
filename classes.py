@@ -15,12 +15,11 @@ from watchdog.observers import Observer
 from watchdog.events import PatternMatchingEventHandler, FileSystemEventHandler
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+from matplotlib.figure import Figure
+import asyncio
 
 np.set_printoptions(threshold=np.inf)
 
-
-
-# TESTING GUI
 class RawHandler(FileSystemEventHandler):
 
     '''
@@ -133,7 +132,19 @@ class RawHandler(FileSystemEventHandler):
         end = time.time()
         print(end-start)
 
-class PlotHandler(PatternMatchingEventHandler):
+class PlotWrapper(PatternMatchingEventHandler):
+    
+    def __init__(self, obj, pattern):
+        self.obj = obj
+        # Call the superclass to ignore directories and only watch for spec. patterns
+        super().__init__(patterns=pattern, ignore_directories=True)
+        
+    # Catch autosave created or modified
+    def on_any_event(self, event):
+        self.obj.on_any_event(event)
+    
+    
+class PlotHandler(object):
 
     '''
     Handles loading InStep predicted outputs and plotting them (if desired.)
@@ -200,7 +211,7 @@ class PlotHandler(PatternMatchingEventHandler):
         ...
     '''
 
-    def __init__(self, pattern, plot=True):
+    def __init__(self, plotter):
         self.num_event = 0      # Track the number of events that have occured
         self.dates = np.zeros((3000), dtype='datetime64[s]') # Array to store timestamps
         self.ref_dates = np.zeros(3000) # Stores dates as a float relative to start
@@ -209,49 +220,11 @@ class PlotHandler(PatternMatchingEventHandler):
         # Reference time to compute plot points. Taken at the start of the program
         # All datetimes will have this value subtracted from them and stored in ref_dates
         self.REF_TIME = np.datetime64(datetime.datetime.today())
-
-        # True if realtime plotting is desired. Stored as a dictionary
-        self.plot_attr = {'true':plot}
-        if plot:
-            # Init ploting variables - figure, ax, and line_array
-            self.plot_attr['fig'] = plt.figure()
-            self.plot_attr['ax'] = self.plot_attr['fig'].add_subplot(111)
-            self.plot_attr['lines_array'] = [] # Will store infomation about each individual line
-
-        # Call the superclass to ignore directories and only watch for spec. patterns
-        super().__init__(patterns=pattern, ignore_directories=True)
-
-    # Called when the file is first read and there is data for the plot
-    def init_plot(self, labels):
-        '''
-        Initalizes the plot when data is first read.
-
-        Sets various plotting parameters and fills lines_array with Line objects,
-        using the labels read in the header of the autosave file.
-
-        Parameters
-        ----------
-        labels : list
-            A list of str corresponding to the labels of variables in the header
-            of the autosave file
-        '''
-        plt.ion() # Interactive mode
-        # Use method __x_format to change time delta back to datetime for xticks
-        formatter = FuncFormatter(self.__x_format)
-        self.plot_attr['ax'].xaxis.set_major_formatter(formatter) # Assign formatter
-        plt.xticks(rotation=35) # Rotate x ticks to fit datetimes
-        plt.tight_layout()
-
-        # Create an empty line object for each column, stored in plot_attr['lines_array']
-        for lab in labels:
-            line, = self.plot_attr['ax'].plot([], [], '-', label=lab,
-                                              marker='d', mfc='white')
-            self.plot_attr['lines_array'].append(line)
-
-        plt.legend()
+        self.plotter = plotter
+        self.labels = None
 
     # Catch autosave created or modified
-    def on_any_event(self, event):
+    async def on_any_event(self, event_path):
         '''
         Called when a file matching any pattern is created or modified
 
@@ -275,20 +248,18 @@ class PlotHandler(PatternMatchingEventHandler):
         '''
         # If it's the first event caught, read header to get col labels
         if self.num_event < 1:
-            with open(event.src_path, 'r') as file:
+            with open(event_path, 'r') as file:
                 labels = file.readline().split(', ')
-                labels[-1].rstrip() # Remove the \n from the last header
-
+                labels[-1] = labels[-1].rstrip() # Remove the \n from the last header
+                self.labels = labels
+                
                 # Init data now that we know how many variables there are
-                self.pred_values = np.zeros((3000, len(labels)))
-
-            # Only call init_plot() if realtime plotting is desired
-            if self.plot_attr['true']:
-                self.init_plot(labels)
+            self.pred_values = np.zeros((3000, len(self.labels)))
+            self.plotter.init_plot(self.REF_TIME, self.labels)
 
         # Try reading the autosave file
         try:
-            temp_data = self.read_last_line(event.src_path) # Get last line
+            temp_data = self.read_last_line(event_path) # Get last line
 
             # Add update dates, ref_dates, and data. All values are initialized to
             # 0, so num_event keeps track of the working index
@@ -297,23 +268,29 @@ class PlotHandler(PatternMatchingEventHandler):
                                               self.REF_TIME).astype('float')
             self.pred_values[self.num_event, :] = temp_data[1]
 
-            if self.plot_attr['true']: # Draw new plot if needed
-                self.update_plot()
-
             self.num_event += 1 # Increment num_event
+            
+            await self.plotter.animate(self)
 
             # Check if the preallocated space of 3000 entries has been used.
             # If so, append room for another 3000 entries, indefinitely
             if self.num_event >= self.pred_values.shape[0]:
-                self.pred_values = np.append(self.pred_values,
-                                             np.zeros((3000, self.pred_values.shape[1])),
-                                             axis=0)
-                self.dates = np.append(self.dates, np.zeros(3000, dtype='datetime64'))
-                self.ref_dates = np.append(self.ref_dates, np.zeros(3000))
+                self.expand_arrays()
 
         # Catches a common error where InStep reports the file as missing
         except IndexError:
             print('InStep reported file missing.')
+            
+            
+    def expand_arrays(self):
+        self.pred_values = np.append(self.pred_values,
+                                     np.zeros((3000, self.pred_values.shape[1])),
+                                     axis=0)
+        self.dates = np.append(self.dates, np.zeros(3000, dtype='datetime64'))
+        self.ref_dates = np.append(self.ref_dates, np.zeros(3000))
+        
+    def get_values(self):
+        return (self.ref_dates[:self.num_event], self.pred_values[:self.num_event,:])
 
     # Assumes name in first col, date in 2nd, time in 3rd, then comma sep pred. values
     @staticmethod
@@ -347,44 +324,75 @@ class PlotHandler(PatternMatchingEventHandler):
         # Return a tuple of the current date and a np array of the values
         return (cur_date, np.array(line[3].split(', ')))
 
-    def update_plot(self):
+    def plot(self, labels):
+        self.plotter = Plotter(self.REF_TIME, labels)
+#        animation.FuncAnimation(self.plotter.fig, self.plotter.animate, 
+#                                fargs = (self, ), interval = 1000)
+
+    
+    
+class Plotter(object):
+    def __init__(self):
+        self.fig = Figure(figsize=(6,6))
+        self.ax = self.fig.add_subplot(111)
+        self.lines_array = []
+        self.REF_TIME=0
+        
+        
+    def init_plot(self, ref_time, labels):
         '''
-        Updates the plot to the most current data, based on num_steps.
+        Initalizes the plot when data is first read.
 
-        Called each time the file is modified, updating each line x and y data
+        Sets various plotting parameters and fills lines_array with Line objects,
+        using the labels read in the header of the autosave file.
+
+        Parameters
+        ----------
+        labels : list
+            A list of str corresponding to the labels of variables in the header
+            of the autosave file
         '''
-        # Update the x and y data of each line_object. Note that x data is plotted with
-        # ref_time, a float representation of the datetime. This is converted by
-        # __x_format to create the correcdt tick marks
-        for idx, line in enumerate(self.plot_attr['lines_array']):
-            line.set_xdata(self.ref_dates[:self.num_event+1])
-            line.set_ydata(self.pred_values[:self.num_event+1, idx])
 
-        # Reset the x and y limits
-        self.plot_attr['ax'].set_xlim(np.min(self.ref_dates[:self.num_event+1]),
-                                      np.max(self.ref_dates[:self.num_event+1]))
-        self.plot_attr['ax'].set_ylim(np.min(self.pred_values[:self.num_event+1,]),
-                                      np.max(self.pred_values[:self.num_event+1,]))
+        # Use method __x_format to change time delta back to datetime for xticks
+#        formatter = FuncFormatter(self.__x_format)
+#        self.ax.xaxis.set_major_formatter(formatter) # Assign formatter
+#        plt.xticks(rotation=35) # Rotate x ticks to fit datetimes
 
-        # Draw the plot and flush events
-        self.plot_attr['fig'].canvas.draw()
-        self.plot_attr['fig'].canvas.flush_events()
+        # Create an empty line object for each column, stored in plot_attr['lines_array']
+        for lab in labels:
+            line, = self.ax.plot([], [], '-', label=lab,
+                                              marker='d', mfc='white')
+            self.lines_array.append(line)
 
-    # To be called in main()
-    def draw_plot(self):
-        '''
-        Ensures the plot is draw correctly by flushing events. Call in main loop.
-        '''
-        self.plot_attr['fig'].canvas.flush_events()
-        plt.pause(0.01)
-
+        self.fig.legend()
+        self.REF_TIME = ref_time
+        
     # Reformats a ref_time in the x data to a readable datetime string for xticks
     def __x_format(self, x_val, pos):
         date_str = np.datetime_as_string(x_val.astype('timedelta64') + self.REF_TIME,
-                                         unit='m')[0]
-        print(date_str)
+                                         unit='m')
         return date_str.replace('T', ' ')
 
+    async def animate(self, update_class):
+        x_values, y_values = update_class.get_values()
+        for idx, line in enumerate(self.lines_array):
+            line.set_xdata(x_values)
+            # handle 1d array
+            if len(y_values.shape) == 1:
+                line.set_ydata(y_values)
+            else:
+                line.set_ydata(y_values[:, idx])
+        
+        self.fig.canvas.flush_events()
+#        plt.draw()
+            
+        self.ax.set_xlim(np.min(x_values),
+                                      np.max(x_values))
+        self.ax.set_ylim(np.min(y_values),
+                                      np.max(y_values))
+        
+#        await asyncio.sleep(0.1)
+        
 def main():
     ''' Prompts user for directory inputs, then starts monitoring.
     '''
@@ -421,11 +429,8 @@ def main():
     try:
         while True:
             time.sleep(1) # Sleep for 1 second
-            # If plotting, and there are things to plot, call the draw_plot() func
-            if processed_handler.num_event > 0 and plot_realtime:
-                processed_handler.draw_plot()
 
-            plt.pause(0.001)    # NECESSARY IN MAIN LOOP for plot to not freeze
+#            plt.pause(0.001)    # NECESSARY IN MAIN LOOP for plot to not freeze
     except KeyboardInterrupt:
         observer.stop()
     observer.join() # Kill observer thread
