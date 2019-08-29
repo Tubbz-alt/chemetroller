@@ -53,27 +53,39 @@ class Pump_Serial(object):
     
     def __init__(self, serialID, conversion_dict=None):
         self.serialID = serialID
-        self.pump_list = [] 
+        self.pump_dict = {}
         self.conversion_dict = conversion_dict
-        self.speed_set = {}
+        
+        self.status_dict = {0:{'0':'Local', '1':'Remote'},
+                            3:{'1':'Idle', '2':'Waiting Go', '3':'Running',
+                               '4':'Stopped Locally', '5':'No Motor Feedback', '6':'Overload',
+                               '7':'Excessive Motor Feedback'},
+                            4:{'0':'None', '1':'Parity', '2':'Framing', '3':'Overun', 
+                               '4':'Invalid Command', '5':'Invalid Data'}}
         
         try:
             self.serial_dev = serial.Serial(self.serialID, baudrate=4800,
                                             parity=serial.PARITY_ODD,
                                             bytesize=serial.SEVENBITS, 
                                             stopbits=serial.STOPBITS_ONE,
-                                            timeout=0.05)
+                                            timeout=0.06)
         except Exception as e:
             print("Got the following exception connecting", e)
         
         
         while('?' in self.rts_status()):
-            reply = self.assign_pump(1)
+            pump_num = len(self.pump_dict) + 1
+            reply = self.assign_pump(pump_num)
             
             if reply == b'\x06':
-                self.pump_list.append(1)
+                self.pump_dict[pump_num] = Pump(pump_num)
+
             else:
                 raise RuntimeError('Pump did not acknowledge assignment') 
+                
+        if len(self.pump_dict) == 0:
+            self.close()
+            raise RuntimeError('No pumps were connected. Ensure connection/restart pumps')
             
     def assign_pump(self, pump_num):
         '''
@@ -100,6 +112,33 @@ class Pump_Serial(object):
         self.serial_dev.write(b'\x05')
         return self.serial_dev.read(64).decode()
     
+    def check_status(self, pump_num):
+        self.valid_pump(pump_num)
+        
+        try:
+            self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}I', 'ascii') + b'\x0D')
+            reply = self.serial_dev.read(100).decode()[5:-1] # the 5 returned numbers
+        except serial.SerialException:
+            return tuple(['Disconnected' for i in range(3)])
+        
+        try:
+            return tuple([self.status_dict[i][reply[i]] for i in [0,3,4]])
+        except (IndexError, KeyError):
+            return ('','','')
+        
+    def full_info(self, pump_num):
+        self.valid_pump(pump_num)
+        
+        pump = self.pump_dict[pump_num]
+        
+        try:
+            total_vol = pump.get_total_vol()
+        except AttributeError:
+            total_vol = "Unknown"
+        
+        return (pump.vol_per_rev, total_vol, pump.rpm, pump.direction) +\
+                self.check_status(pump_num)
+        
     def assign_speed(self, pump_num, direction, rpm):
         '''
         Assigns a direction and rpm to a specfic pump.
@@ -120,9 +159,10 @@ class Pump_Serial(object):
         '''
         self.valid_pump(pump_num)
         
+        rpm = float(rpm)
+        
         if rpm > 600 or rpm < 10:
-            raise ValueError('Not a valid rpm (10 <= rpm <= 600)')
-            
+            raise ValueError('Not a valid rpm (10 <= rpm <= 600)')   
         direction = direction.lower()
         if direction not in ['cw', 'ccw']:
             raise ValueError('Direction must be cw or ccw')
@@ -140,8 +180,9 @@ class Pump_Serial(object):
             self.halt_pump(pump_num)
             
             self.assign_speed(pump_num, direction, rpm)    
-        self.speed_set[pump_num] = True
-            
+        self.pump_dict[pump_num].set_speed(direction, rpm)
+        
+        
     def assign_rev(self, pump_num, rev, run=True):
         '''
         Assign the number of revolutions to spin for a pump. Runs immediately by default.
@@ -169,11 +210,14 @@ class Pump_Serial(object):
             raise ValueError('rev must be a positive number')
         
         rev = round(rev, 2)
-        self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}V{rev:08}',
-                                              'ascii') + b'\x0D')
         
-        if run:
-            self.run_pump(pump_num)
+        if rev != 0:
+            self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}V{rev:08}',
+                                                  'ascii') + b'\x0D')
+            
+            self.pump_dict[pump_num].total_rev += rev
+            if run:
+                self.run_pump(pump_num)
     
     def run_pump(self, pump_num):
         '''
@@ -192,7 +236,7 @@ class Pump_Serial(object):
                 
         self.valid_pump(pump_num)
         
-        if not self.speed_set[pump_num]:
+        if self.pump_dict[pump_num].rpm == 0:
             raise ValueError('Pump must have speed assigned before running')
             
         self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}G',
@@ -215,8 +259,8 @@ class Pump_Serial(object):
         '''
         Assigns local control to all pumps, then closes the serial port.
         '''
-        for i in self.pump_list:
-            self.serial_dev.write(b'\x02' + bytes(f'P{i+1:02}L',
+        for i in self.pump_dict:
+            self.serial_dev.write(b'\x02' + bytes(f'P{i:02}L',
                                                   'ascii') + b'\x0D')
         self.serial_dev.close()
         
@@ -241,54 +285,7 @@ class Pump_Serial(object):
         return self.serial_dev.read(16).decode()
         #return float(reply[3:-2])
             
-    def vol_to_rev(self, vol, tubing_size):
-        '''
-        Converts a volume in mL to revolutions using the conversion dict.
-        
-        conversion_dict must be defined and must include the tubing size passed.
-        
-        Parameters
-        ----------
-            vol : float
-                The volume to convert in mL
-            
-            tubing_size : int
-                The standard tubing size the pump is using. Must be a key present
-                in conversion_dict.
-        
-        Returns
-        -------
-            float
-                Number of revolutions required for this volume.
-        '''
-        self.valid_converison(tubing_size)
-        
-        return vol / self.conversion_dict[tubing_size]
-    
-    def rev_to_vol(self, rev, tubing_size):
-        '''
-        Converts revolutions to a volume in mL using the conversion dict.
-        
-        conversion_dict must be defined and must include the tubing size passed.
-        
-        Parameters
-        ----------
-            rev : float
-                The number of revolutions to convert.
-            
-            tubing_size : int
-                The standard tubing size the pump is using. Must be a key present
-                in conversion_dict.
-        
-        Returns
-        -------
-            float
-                Volume in mL that these revolutions and tubing size equate to.
-        '''
-        self.valid_converison()
-        return rev * self.conversion_dict[tubing_size]
-    
-    def dispense_vol(self, pump_num, vol, tubing_size):
+    def dispense_vol(self, pump_num, vol):
         '''
         Dispense a volume in mL from a specified pump.
         
@@ -302,18 +299,13 @@ class Pump_Serial(object):
             
             vol : float
                 The volume to dispense in mL
-            
-            tubing_size : int
-                The standard tubing size the pump is currently using. Must be a key
-                that's defined in conversion_dict.
         '''
-        revs = self.vol_to_rev(vol, tubing_size)
+        revs = self.pump_dict[pump_num].vol_to_rev(vol)
         self.assign_rev(pump_num, revs)
- 
        
     def valid_pump(self, pump_num):
         ''' Checks if this pump is valid. Raises ValueError if not.'''
-        if pump_num not in self.pump_list:
+        if pump_num not in self.pump_dict:
             raise ValueError('Not a valid pump ID')
             
     def valid_converison(self, tubing_size):
@@ -322,9 +314,41 @@ class Pump_Serial(object):
             raise ValueError('Volume Conversion dictionary must be defined')
         if tubing_size not in self.conversion_dict:
             raise ValueError('Conversion not defined for this tubing size')
-
+            
+    def set_vol_per_rev(self, pump_num, vol_per_rev):
+        self.pump_dict[pump_num].set_vol_per_rev(vol_per_rev)
+            
+class Pump(object):
+    
+    def __init__(self, ID):
+        self.ID = ID
+        self.total_rev = 0
+        self.rpm = 0
+        self.vol_per_rev = None
+        self.direction = None
+        
+    def set_vol_per_rev(self, vol_per_rev):
+        vol_per_rev = float(vol_per_rev)
+        if vol_per_rev < 0 :
+            raise ValueError("Volume must be positive")
+        self.vol_per_rev = vol_per_rev
+        
+    def set_speed(self, direction, rpm):
+        self.direction = direction
+        self.rpm = rpm
             
         
+    def get_total_vol(self):
+        if self.vol_per_rev == None:
+            raise AttributeError('vol_per_rev not assigned for this pump')
+        return self.total_rev * self.vol_per_rev
+    
+    def vol_to_rev(self, vol):
+        if vol < 0:
+            raise ValueError('Volume must be positive')
+        if self.vol_per_rev == None:
+            raise AttributeError("Volume (mL) per rev for this pump has not been assigned")
+        return vol / self.vol_per_rev 
         
         
         
