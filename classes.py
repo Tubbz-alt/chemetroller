@@ -12,15 +12,16 @@ from tkinter.filedialog import askdirectory
 import pandas as pd
 import numpy as np
 from watchdog.observers import Observer
-from watchdog.events import PatternMatchingEventHandler, FileSystemEventHandler
-import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from matplotlib.figure import Figure
 import asyncio
+from simple_pid import PID
+import warnings 
+warnings.filterwarnings("ignore", category=UserWarning)
 
 np.set_printoptions(threshold=np.inf)
 
-class RawHandler(FileSystemEventHandler):
+class RawHandler(object):
 
     '''
     Handles detecting and processing raw spectra files into an InStep format.
@@ -33,9 +34,10 @@ class RawHandler(FileSystemEventHandler):
     ----------
     None
     '''
+    
 
     # Method called when a file is created
-    def on_created(self, event):
+    async def on_created(self, event_path):
 
         '''
         Runs when the Observer passes a FileCreatedEvent. Attempts to process it as a raw spectra
@@ -50,15 +52,14 @@ class RawHandler(FileSystemEventHandler):
             An watchdog Event object (automatically passed by the Observer)
         '''
 
-        print(f'Event Type: {event.event_type}\n Path: {event.src_path}')
         time.sleep(.5)      # Allow time for file to fully copy
         for i in range(3):  # Try reading it three times, catching any error
             try:
-                self.process_file(event.src_path)
+                self.process_file(event_path)
             except Exception as error:
                 print(f'Error reading file... Trying again. {2-i} attempts remaining.')
                 print(error)
-                time.sleep(.1)
+                await asyncio.sleep(.1)
             else:
                 break
 
@@ -90,7 +91,7 @@ class RawHandler(FileSystemEventHandler):
         output_file = input_file.parent / 'Output' / (input_file.name[:-4] +
                                                       '_proc.dat')
 
-        # Read Raman - Skip firt 23 metadata rows, no header
+        # Read Raman - Skip first 23 metadata rows, no header
         # Takes Raman Shift and Dark Subtracted
         with input_file.open(mode='r') as file:
             data = pd.read_csv(file, sep='\t', usecols=[1, 3], skiprows=23,
@@ -132,19 +133,9 @@ class RawHandler(FileSystemEventHandler):
         end = time.time()
         print(end-start)
 
-class PlotWrapper(PatternMatchingEventHandler):
-    
-    def __init__(self, obj, pattern):
-        self.obj = obj
-        # Call the superclass to ignore directories and only watch for spec. patterns
-        super().__init__(patterns=pattern, ignore_directories=True)
-        
-    # Catch autosave created or modified
-    def on_any_event(self, event):
-        self.obj.on_any_event(event)
     
     
-class PlotHandler(object):
+class PredictionHandler(object):
 
     '''
     Handles loading InStep predicted outputs and plotting them (if desired.)
@@ -353,10 +344,10 @@ class Plotter(object):
             of the autosave file
         '''
 
-        # Use method __x_format to change time delta back to datetime for xticks
-#        formatter = FuncFormatter(self.__x_format)
-#        self.ax.xaxis.set_major_formatter(formatter) # Assign formatter
-#        plt.xticks(rotation=35) # Rotate x ticks to fit datetimes
+        # Use method x_format to change time delta back to datetime for xticks
+        formatter = FuncFormatter(self.x_format)
+        self.ax.xaxis.set_major_formatter(formatter) # Assign formatter
+        self.ax.tick_params(axis='x', labelrotation=30, labelsize='small') # Rotate x ticks to fit datetimes
 
         # Create an empty line object for each column, stored in plot_attr['lines_array']
         for lab in labels:
@@ -367,10 +358,13 @@ class Plotter(object):
         self.fig.legend()
         self.REF_TIME = ref_time
         
+    def set_ylabel(self, label):
+        self.ax.set_ylabel(label)
+        
     # Reformats a ref_time in the x data to a readable datetime string for xticks
-    def __x_format(self, x_val, pos):
+    def x_format(self, x_val, pos, unit='m'):
         date_str = np.datetime_as_string(x_val.astype('timedelta64') + self.REF_TIME,
-                                         unit='m')
+                                         unit=unit)
         return date_str.replace('T', ' ')
 
     async def animate(self, update_class):
@@ -391,7 +385,101 @@ class Plotter(object):
         self.ax.set_ylim(np.min(y_values),
                                       np.max(y_values))
         
-#        await asyncio.sleep(0.1)
+        
+class PID_Handler(object):
+    
+    def __init__(self, max_vol, pred_handler, plotter, tracking, log_file):
+        self.vol = np.zeros(3000) # Stores pid values.
+        self.pred_handler = pred_handler
+        self.pid = PID(0.001, 0.5, 0, setpoint=60, output_limits=(0, 20),
+                       proportional_on_measurement = False)
+        
+        self.plotter = plotter
+        self.plotter.init_plot(self.pred_handler.REF_TIME, ['Volume (mL)'])
+        
+        self.tracking = tracking
+        self.log_file = log_file
+        self.max_vol = max_vol
+        
+        self.write_header()
+
+        
+        
+    def get_status(self):
+        mode_dict = {True:'Enabled', False:'Disabled'}
+        try:
+            return (mode_dict[self.pid.auto_mode], self.pred_handler.labels[self.tracking], 
+                    self.pid.setpoint) + self.pid.tunings + self.pid.output_limits + \
+                    (self.max_vol, mode_dict[self.pid.proportional_on_measurement])
+        except TypeError:
+            return (mode_dict[self.pid.auto_mode], self.tracking, 
+                    self.pid.setpoint) + self.pid.tunings + self.pid.output_limits + \
+                    (self.max_vol, mode_dict[self.pid.proportional_on_measurement])
+                
+    def get_tracking(self):
+        try:
+            return self.pred_handler.labels[self.tracking]
+        except TypeError:
+            return self.tracking
+        
+    def expand_arrays(self):
+        self.vol = np.append(self.vol, np.zeros(3000))
+        
+    async def trigger_PID(self):
+        
+        value = self.pred_handler.pred_values[self.pred_handler.num_event - 1, 
+                                              self.tracking]
+        
+        if self.pred_handler.num_event >= self.vol.shape[0]:
+            self.expand_arrays()
+            
+        vol = round(self.pid(value), 3)
+        
+        if vol + np.sum(self.vol) > self.max_vol:
+            vol = max(0, (self.max_vol - np.sum(self.vol)))
+        
+        self.vol[self.pred_handler.num_event - 1] = vol
+        
+        self.write_to_log(value, vol)
+        
+        await self.plotter.animate(self)
+        
+    def last(self):
+        return self.vol[self.pred_handler.num_event - 1]
+    
+    def get_values(self):
+        limit = self.pred_handler.num_event
+        return (self.pred_handler.ref_dates[:limit], np.cumsum(self.vol[:limit]))
+    
+    def update_all(self, track, setpoint, coeffs, limits, max_vol):        
+        try:
+            self.tracking = self.pred_handler.labels.index(track)
+        except AttributeError:
+            self.tracking = int(track)
+        
+        self.pid.setpoint = setpoint
+        self.pid.tunings = coeffs
+        self.pid.output_limits = limits
+        self.max_vol = max_vol
+    
+    def write_header(self):
+        header = ['Datetime', 'Status', 'Tracking', 'Set Point', 'Prop.', 'Int', 'Deriv', 
+                  'Lower Limit', 'Upper Limit', 'Max Volume', 'Input', 'Output', 'Cumulative']
+        with open(self.log_file, 'w') as f:
+            f.write(', '.join(header))
+            f.write('\n')
+            
+    def write_to_log(self, input_val, output_val):
+        last = self.pred_handler.num_event - 1
+        date = self.plotter.x_format(self.pred_handler.ref_dates[last], None, 's')
+        values = [date] + list(self.get_status()) +\
+                    [input_val, output_val, self.get_values()[1][-1]]
+            
+        line = ', '.join([str(i) for i in values])
+        
+        with open(self.log_file, 'a') as f: 
+            f.write(line)
+            f.write('\n')
         
 def main():
     ''' Prompts user for directory inputs, then starts monitoring.
@@ -421,7 +509,7 @@ def main():
     observer.schedule(raw_handler, path=raw_path)
 
     # Pattern arg ensures that other files aren't handled, only the autosave
-    processed_handler = PlotHandler(pattern=['*InStepAutoSave*'], plot=plot_realtime)
+    processed_handler = PredictionHandler(pattern=['*InStepAutoSave*'], plot=plot_realtime)
     observer.schedule(processed_handler, path=processed_path, recursive=False)
     observer.start() # Start the oberver
 
