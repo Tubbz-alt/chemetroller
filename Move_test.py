@@ -12,4 +12,4 @@ dest = r'C:\Users\Raman\Desktop\Raman\Input'
 
 for f in os.listdir(r_files):
     shutil.copy(r_files + '\\' + f, dest)
-    time.sleep(5)
+    time.sleep(20)
