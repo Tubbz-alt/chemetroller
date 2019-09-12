@@ -3,44 +3,79 @@
 Created on Thu Jul 25 12:50:36 2019
 
 @author: Raman
+
+This module contains classes used to handle various events that occur.
+
+RawFileProcessor:
+    Handles processing raw raman spectrum files.
+    
+Plotter:
+    Plots data given to it by a PredictionHandler ora PIDHandler
+
+PredictionHandler:
+    Handles reading an InStep autosave file to extract predicted values and store them
+    
+PIDHandler:
+    Handles the PID loop, which is based on values stored in a PredcitionHandler
 """
 import datetime
-import time
 from pathlib import Path
-from tkinter import Tk, messagebox
-from tkinter.filedialog import askdirectory
+import warnings
+import asyncio
+
 import pandas as pd
 import numpy as np
-from watchdog.observers import Observer
 from matplotlib.ticker import FuncFormatter
 from matplotlib.figure import Figure
-import asyncio
-from simple_pid import PID
-import warnings 
-warnings.filterwarnings("ignore", category=UserWarning)
+import matplotlib.pyplot as plt
 
+from simple_pid import PID
+from watchgod import Change
+
+warnings.filterwarnings("ignore", category=UserWarning)
 np.set_printoptions(threshold=np.inf)
 
-class RawHandler(object):
+class RawFileProcessor(object):
 
     '''
-    Handles detecting and processing raw spectra files into an InStep format.
+    Handles processing raw spectra files into an InStep format.
 
-    This object is passed to an Observer schedule from watchdog, which defines
-    where the raw spectra files will be looked for. On creation of a file in
-    that directory <par_dir>, it is procesed and written to <par_dir>/Output
+    This object is called by watchgod in main when a raw spectrum file is created.
+    On creation of a file in that directory <par_dir>, it is procesed and written
+    to <par_dir>/Output.
+
 
     Parameters
     ----------
     None
     '''
-    
+
+    async def on_any_event(self, event_type, event_path):
+        '''
+        To be called when an event occurs. Determines what action to take,
+
+        If the event is of type <added>, it is passed to on_created(). Otherwise,
+        it is ignored.
+
+        Parameters
+        ----------
+            event_type : watchgod.Change
+                watchgod.Change type indicating the type of file event
+
+            event_path : string
+                Path to where the event occured
+
+        '''
+
+        if event_type == Change.added:
+            await self.on_created(event_path)
+
 
     # Method called when a file is created
     async def on_created(self, event_path):
 
         '''
-        Runs when the Observer passes a FileCreatedEvent. Attempts to process it as a raw spectra
+        Runs when a new raw spectrum file is added. Attempts to process it
 
         Attempts to process the created file three times before passing. This allows for
         multiple attempts when the file hasn't fully copied or isn't an actual spectra
@@ -48,11 +83,11 @@ class RawHandler(object):
 
         Parameters
         ----------
-        event : watchdog.events.FileSystemEvent
-            An watchdog Event object (automatically passed by the Observer)
+        event_path : string
+            A path to the newly created raw spectrum file
         '''
 
-        time.sleep(.5)      # Allow time for file to fully copy
+        await asyncio.sleep(.5)      # Allow time for file to fully copy
         for i in range(3):  # Try reading it three times, catching any error
             try:
                 self.process_file(event_path)
@@ -103,44 +138,31 @@ class RawHandler(object):
             if not any(data.notna()):
                 raise ValueError
 
-     # Write Raman
-        start = time.time()
+        # Write Raman
         with output_file.open(mode='w') as file:
             # Dims
             file.write('#d, ' + str(data.shape[0]) + 'x1')
             file.write('\n')
-            
+
+            # Column Names (wavenumbers) - join() fast enough for two lines
             file.write('#c ')
             file.write(', '.join([str(i) for i in data.iloc[:, 0].values]))
             file.write('\n')
-            
+
+            # Dark Subtracted
             file.write('#s, S1, ')
             file.write(', '.join([str(i) for i in data.iloc[:,1].values]))
             file.write('\n')
 
-            # #C and shifts
-#            file.write('#c, ' + np.array2string(data.iloc[:, 0].values, separator=',',
-#                                                max_line_width=np.inf, precision=4,
-#                                                floatmode='fixed')[2:-1]) # Trim ends
-#            file.write
-#            
-#            file.write('\n')
-#            # Shift values
-#            file.write('#s, S1, ' + np.array2string(data.iloc[:, 1].values, separator=',',
-#                                                    max_line_width=np.inf, precision=4,
-#                                                    floatmode='fixed')[2:-1])
-#            file.write('\n')
-        end = time.time()
-        print(end-start)
 
-    
-    
+
+
 class PredictionHandler(object):
 
     '''
-    Handles loading InStep predicted outputs and plotting them (if desired.)
+    Handles loading and storing InStep predicted outputs.
 
-    Reads a continually updated InStep AutoSave file in the directory passed to the Observer.
+    Reads a continually updated InStep AutoSave file in the directory watchdog is monitoring
     File must have a comma separated header of predicted value names (in order),
     then rows of tab separated: filename, date, time, <comma sep predicted values>.
     Dates are of format %m/%d/%Y, while time is of format %I:%M:%S %p
@@ -151,12 +173,9 @@ class PredictionHandler(object):
 
     Parameters
     ----------
-        pattern : list
-            A list of pattern strings (usually only one) to specify the name of the file
-            autosave file to watch for (e.g. [*InStepAutoSave*])
-
-        plot : bool
-            True if realtime plotting of predicted values is desired.
+        plotter : classes.Plotter()
+            An instance of a classes.Plotter class. This will be used for handling the
+            plot in the gui.
 
     Attributes
     ----------
@@ -174,29 +193,18 @@ class PredictionHandler(object):
             A 2 dim array used to store predicted values. Only initialized once the
             number of values needed is known. Rows are entries, columns are variables
 
-        REF_TIME : np.datetime64
-            A constant datetime object used to compute ref_dates
+        plotter : classes.Plotter()
+            An instance of classes.Plotter() that data will be handed to for plotting
+            in the gui
 
-        plot_attr : dict
-            A dict of plotting attributes
-
-            plot : bool
-                True if plotting is desired
-
-            If plot, other values are initalized
-
-            fig : plt.figure
-
-            ax : plt.ax
-                ax of subplot of fig
-
-            lines_array : list
-                List of line objects corresponding to each predicted variable tracked
+        labels : list
+            A list of the names of the predicted species - initially None until
+            the AutoSave file is read for the first time
 
     Examples
     --------
     AutoSave Format:
-        Glucose, Xylose, Ilcatose
+        Glucose, Xylose, Ilactic Acid
         <File Name> \t <Date> \t <Time> \t <gluc_pred, xyl_pred, ilcat_pred>
         <File Name> \t <Date> \t <Time> \t <gluc_pred, xyl_pred, ilcat_pred>
         ...
@@ -205,26 +213,43 @@ class PredictionHandler(object):
     def __init__(self, plotter):
         self.num_event = 0      # Track the number of events that have occured
         self.dates = np.zeros((3000), dtype='datetime64[s]') # Array to store timestamps
-        self.ref_dates = np.zeros(3000) # Stores dates as a float relative to start
+        self.ref_dates = np.zeros((3000), dtype='timedelta64[s]') # Stores dates as a float relative to start
         self.pred_values = None # Stores predicted values. Initalized once num of cols is known
 
-        # Reference time to compute plot points. Taken at the start of the program
-        # All datetimes will have this value subtracted from them and stored in ref_dates
-        self.REF_TIME = np.datetime64(datetime.datetime.today())
-        self.plotter = plotter
-        self.labels = None
+        self.plotter = plotter # Data will be handed to this for plotting
+        self.labels = None # Stores the names of the predicted compounds (header)
+
+    async def on_any_event(self, event_type, event_path):
+        '''
+        To be called when an event occurs. Determines what action to take,
+
+        If the event is of type <added>, it is passed to on_created(). Otherwise,
+        it is ignored.
+
+        Parameters
+        ----------
+            event_type : watchgod.Change
+                watchgod.Change type indicating the type of file event
+
+            event_path : string
+                Path to where the event occured
+        '''
+
+        if event_type == Change.added or event_type == Change.modified:
+            await self.on_create_mod(event_path)
 
     # Catch autosave created or modified
-    async def on_any_event(self, event_path):
+    async def on_create_mod(self, event_path):
         '''
         Called when a file matching any pattern is created or modified
 
-        If the file is just created, reads the header and calls plot_init() if needed.
-        Also initalizes preed_values to have the correct number of columns.
+        If the file is just created, reads the header and calls plotter.init(),
+        passing the now known labels. Also initalizes pred_values to have the correct
+        number of columns.
 
         Upon modification, the last line of the file is read and the data structures are
-        updated accordingly at the index corresponding to num_event. Updates the plot
-        if plot=True.
+        updated accordingly at the index corresponding to num_event. Also updates
+        the plotter data by calling plotter.anmiate()
 
         If the file exceeds 3000 entries, the data structures are extended by 3000.
         This is done indefinitely everytime the structure becomes filled
@@ -234,19 +259,20 @@ class PredictionHandler(object):
 
         Parameters
         ----------
-        event : watchdog.events.FileSystemEvent
-            An watchdog Event object (automatically passed by the Observer)
+       event_path : string
+            A path to the AutoSave file.
         '''
+
         # If it's the first event caught, read header to get col labels
         if self.num_event < 1:
             with open(event_path, 'r') as file:
                 labels = file.readline().split(', ')
                 labels[-1] = labels[-1].rstrip() # Remove the \n from the last header
                 self.labels = labels
-                
-                # Init data now that we know how many variables there are
+
+            # Init now that we know how many variables there are
             self.pred_values = np.zeros((3000, len(self.labels)))
-            self.plotter.init_plot(self.REF_TIME, self.labels)
+            self.plotter.init_plot(self.labels)
 
         # Try reading the autosave file
         try:
@@ -254,14 +280,15 @@ class PredictionHandler(object):
 
             # Add update dates, ref_dates, and data. All values are initialized to
             # 0, so num_event keeps track of the working index
-            self.dates[self.num_event] = np.datetime64(temp_data[0])
-            self.ref_dates[self.num_event] = (self.dates[self.num_event] -
-                                              self.REF_TIME).astype('float')
+            self.dates[self.num_event] = np.datetime64(temp_data[0], 's')
+            # Store as seconds in UNIX time
+            self.ref_dates[self.num_event] = self.dates[self.num_event].astype('timedelta64[s]')
+
             self.pred_values[self.num_event, :] = temp_data[1]
 
             self.num_event += 1 # Increment num_event
-            
-            await self.plotter.animate(self)
+
+            await self.plotter.animate(self) # Update the plotter, passing self
 
             # Check if the preallocated space of 3000 entries has been used.
             # If so, append room for another 3000 entries, indefinitely
@@ -271,16 +298,27 @@ class PredictionHandler(object):
         # Catches a common error where InStep reports the file as missing
         except IndexError:
             print('InStep reported file missing.')
-            
-            
+
+
     def expand_arrays(self):
+        '''
+        Expands data arrays by 3000 if they become full.
+        '''
         self.pred_values = np.append(self.pred_values,
                                      np.zeros((3000, self.pred_values.shape[1])),
                                      axis=0)
-        self.dates = np.append(self.dates, np.zeros(3000, dtype='datetime64'))
+        self.dates = np.append(self.dates, np.zeros(3000, dtype='datetime64[s]'))
         self.ref_dates = np.append(self.ref_dates, np.zeros(3000))
-        
+
     def get_values(self):
+        '''
+        Necessary for plotter. Returns all collected data thus far.
+
+        Returns
+        -------
+            tuple
+                A tuple of the collected ref_dates and the collected predicted values
+        '''
         return (self.ref_dates[:self.num_event], self.pred_values[:self.num_event,:])
 
     # Assumes name in first col, date in 2nd, time in 3rd, then comma sep pred. values
@@ -315,22 +353,57 @@ class PredictionHandler(object):
         # Return a tuple of the current date and a np array of the values
         return (cur_date, np.array(line[3].split(', ')))
 
-    def plot(self, labels):
-        self.plotter = Plotter(self.REF_TIME, labels)
-#        animation.FuncAnimation(self.plotter.fig, self.plotter.animate, 
-#                                fargs = (self, ), interval = 1000)
+    def get_labels(self):
+        '''
+        Returns labels
+        '''
+        return self.labels
 
-    
-    
+
 class Plotter(object):
+    '''
+    Plots data for a handler.
+
+    By passing an instance of Plotter() to one of the handlers, it will plot
+    whatever is returned by that handler's get_values() function, with the 0th
+    index of the tuple being x values and the 1st index being y values.
+
+    If multiple y lines are being plotted, the rows correspond to x values and
+    columns correspond to different lines.
+
+    Unix time is used because matplotlib incorecctly plots datetimes. Therefore, it
+    plots the unix time delta and we format the x tick labels to be our choosing
+    (absolute time or a time delta to some other point).
+
+    Attributes
+    ----------
+        fig : matplotlib.Figure()
+            a figure to draw on
+
+        ax : matplotlib.axes
+            a matplotlib ax within the figure
+
+        lines_array : list of lineplots
+            a list of lineplots plotted on the ax. Used to update the plot
+            each time animate() is called
+
+        start_time : numpy.timedelta64[s]
+            The UNIX time delta in seconds from which elapsed time can be computed from.
+            Defaults to 0 (Jan 1 1970) until asigned by another class.
+
+        format_abs : boolean
+            True if the plot should be formated in absolute time. False for elapsed time
+
+    '''
     def __init__(self):
-        self.fig = Figure(figsize=(6,6))
-        self.ax = self.fig.add_subplot(111)
+        self.fig = Figure(figsize=(6,6)) # 6 inches x 6 inches
+        self.ax = self.fig.add_subplot(111) # Only one subplot centered in fig
         self.lines_array = []
-        self.REF_TIME=0
-        
-        
-    def init_plot(self, ref_time, labels):
+        self.start_time = np.timedelta64(0, 's')
+        self.format_abs = True
+
+
+    def init_plot(self, labels):
         '''
         Initalizes the plot when data is first read.
 
@@ -340,189 +413,447 @@ class Plotter(object):
         Parameters
         ----------
         labels : list
-            A list of str corresponding to the labels of variables in the header
-            of the autosave file
+            A list of str that lines will be labeled as. Should match the length of
+            the columns returned in the y data when a handler's get_values() is called,
+            and in the corresponding indicies
         '''
 
-        # Use method x_format to change time delta back to datetime for xticks
-        formatter = FuncFormatter(self.x_format)
-        self.ax.xaxis.set_major_formatter(formatter) # Assign formatter
+        self.set_x_format(True)
+
         self.ax.tick_params(axis='x', labelrotation=30, labelsize='small') # Rotate x ticks to fit datetimes
 
         # Create an empty line object for each column, stored in plot_attr['lines_array']
         for lab in labels:
             line, = self.ax.plot([], [], '-', label=lab,
-                                              marker='d', mfc='white')
+                                 marker='d', mfc='white')
             self.lines_array.append(line)
 
+        # Create legend
         self.fig.legend()
-        self.REF_TIME = ref_time
-        
+
     def set_ylabel(self, label):
+        '''
+        Sets the y axis label of the plot.
+
+        Parameters
+        ----------
+            label : string
+                string of the label to display on the y axis
+        '''
         self.ax.set_ylabel(label)
-        
-    # Reformats a ref_time in the x data to a readable datetime string for xticks
-    def x_format(self, x_val, pos, unit='m'):
-        date_str = np.datetime_as_string(x_val.astype('timedelta64') + self.REF_TIME,
-                                         unit=unit)
-        return date_str.replace('T', ' ')
+
+    def set_x_format(self, format_abs):
+        '''
+        Set x axis to be on absolute time (PST) or an elapsed time. Changes axis label
+
+        Parameters
+        ----------
+            format_abs : boolean
+                True if format should be set to absolute time. False for elapsed time
+        '''
+        # Create formatter and set x axis label
+        if format_abs:
+            formatter = FuncFormatter(self.x_format_abs)
+            self.ax.set_xlabel('Absolute Time (PST)')
+        else:
+            formatter = FuncFormatter(self.x_format_rel)
+            self.ax.set_xlabel('Elapsed Time (hr)')
+
+        # Set formater and the format_abs attribute
+        self.ax.xaxis.set_major_formatter(formatter)
+        self.format_abs = format_abs
+
+    def x_format_abs(self, x_val, pos, unit='m'):
+        '''
+        Reformats a Unix time in the x data to a readable datetime string for xticks
+
+        Parameters
+        ----------
+            x_val : numpy.timedelta64[s]
+                Passed by Matplotlib, but assumes the data type
+
+            pos : None
+                Required by matplotlib, but un used. Pass none to call manually
+
+            unit : string
+                Unit to set the smallest time to. Default is "m" for minutes
+
+        Returns
+        -------
+            A string formatted as a neat datetime
+        '''
+        date_str = np.datetime_as_string(x_val.astype('datetime64[s]'), unit=unit)
+        return date_str.replace('T', ' ') # Remove a T from numpy's output
+
+    def x_format_rel(self, x_val, pos, decimals=3):
+        '''
+        Reformats a Unix time in the x data to an elapsed time in hrs using start_time
+
+        Parameters
+        ----------
+            x_val : numpy.timedelta64[s]
+                Passed by Matplotlib, but assumes the data type
+
+            pos : None
+                Required by matplotlib, but un used. Pass none to call manually
+
+            decimals : int
+                How many decimals to round the hour to. Default is 3.
+
+        Returns
+        -------
+            A float of the time difference in hours between x_val and start_time
+        '''
+        # Find difference in seconds, convert to hours, and round
+        return np.round((x_val.astype('int') - self.start_time.astype('int')) / 3600,
+                        decimals=decimals)
 
     async def animate(self, update_class):
-        x_values, y_values = update_class.get_values()
-        for idx, line in enumerate(self.lines_array):
+        '''
+        Updates the plot with new data. Call when new data is available
+
+        Should be used async -- call await animate()
+
+        init_plot() should be called first so labels and lines can be initalized
+
+        update_class must have a get_values() method that returns a tuple.
+        The first item should be a 1D array containing x values.
+        The second item can be a 1D or 2D array with as many rows as the first item.
+        It should contain as many columns as labels passed to init_plot() does
+        Each column corresponds to a different line to be plotted
+
+        Parameters
+        ----------
+            update_class : Instance of class containing get_values() method
+                This class will have its get_values() method called, which will
+                be then used to update the plot.
+        '''
+        x_values, y_values = update_class.get_values() # Get new x and y data
+        for idx, line in enumerate(self.lines_array): # Set values for each line
             line.set_xdata(x_values)
-            # handle 1d array
-            if len(y_values.shape) == 1:
+
+            if len(y_values.shape) == 1: # Handle 1D y array
                 line.set_ydata(y_values)
             else:
                 line.set_ydata(y_values[:, idx])
-        
+
         self.fig.canvas.flush_events()
-#        plt.draw()
-            
-        self.ax.set_xlim(np.min(x_values),
-                                      np.max(x_values))
+        plt.tight_layout()
+
+        # Set x and y limits to the minimum and maximum values
+        self.ax.set_xlim(np.min(x_values.astype('int')) - 60,
+                                np.max(x_values.astype('int')) + 60)
         self.ax.set_ylim(np.min(y_values),
-                                      np.max(y_values))
-        
-        
-class PID_Handler(object):
-    
-    def __init__(self, max_vol, pred_handler, plotter, tracking, log_file):
-        self.vol = np.zeros(3000) # Stores pid values.
+                         np.max(y_values))
+
+
+class PIDHandler(object):
+    '''
+    Handles the PID loop. Intended to output a volume in mL
+
+    Given a prediction_handler and a plotter, will track one of the values recorded
+    by the prediction_handler and feed it to a pid. It stores the values returned
+    by the values returned by the PID and hands them to the plotter. Will write info
+    to a log file on every call to the PID.
+
+    The handler bases what value it's tracking on the column index of the y_values (2nd item)
+    returned by the pred_handler's get_values(). It also uses the pred_handlers dates
+    (returned as 1st item in get_values()) to track the time at which the PID was updated,
+    instead of keeping its own record.
+
+    The PID has many adjustable parameters - the P, I, D coeffs, the setpoint,
+    the lower and upper output limits, a proportional on measurement option, and
+    a maximum cumulative output option (will always output zero if reached).
+
+    Parameters
+    ----------
+        max_vol : float
+            The maximum cumulative output of the PID. If the sum of all PID outputs
+            reaches this value, each following output will be recorded as 0, no matter
+            what the actually has ouput
+
+        pred_handler : classes.PredictionHandler()
+            A PredictionHandler instance that will be used to supply input values
+            to the PID. Could also be any class that has a get_values() and a
+            get labels() method that meet the specifications of PredictionHandler
+
+        plotter : classes.Plotter()
+            A Plotter instance that data will be passed to upon recieving a new PID output
+
+        track_idx : int
+            The column index of the value to be tracking in the 2nd item returned by
+            pred_handler's method get_values().
+
+        log_file : string
+            Path to write the log file to, overwritten on every initalization. See
+            write_to_log() for details of the log file
+
+    Attributes
+    ----------
+        vol : numpy.ndarray
+            An array to keep track of the output of the PID at every call, typically
+            a volume in mL
+
+        pred_handler : classes.PredictionHandler()
+            Reference to pred_handler parameter
+
+        pid : simple_pid.PID()
+            The PID object that values will be fed to and outputs will be recorded from.
+            Read simple_pid docs for a more detailed documentation of parameters.
+
+        plotter : classes.Plotter()
+            Reference to plotter parameter
+
+        track_idx : int
+            Reference to track_idx parameter
+
+        log_file : string
+            Reference to log_file parameter
+
+        max_vol : float
+            Reference to max_vol parameter
+
+        num_event : int
+            number of times the PID has been called
+
+    Example
+    -------
+        Suppose pred_handler returned three columns in the second item of get_values(),
+        each column corresponding to a different compound being recorded (e.g. Glucose,
+        Xylose, Itaconic Acid). If track_idx was set to 0, on each call to trigger_PID(),
+        the last value of the glucose column would be fed to the PID an it's output recorded.
+        Therefore, the pred_handler should be updated before triggering the PID.
+    '''
+
+    def __init__(self, max_vol, pred_handler, plotter, track_idx, log_file):
+        self.vol = np.zeros(3000) # Stores pid output values.
         self.pred_handler = pred_handler
-        self.pid = PID(0.001, 0.5, 0, setpoint=60, output_limits=(0, 20),
-                       proportional_on_measurement = False)
-        
+
+        # Default values of the PID can be changed here
+        self.pid = PID(0.001, 0.1, 0, setpoint=40, output_limits=(0, 20),
+                       proportional_on_measurement=True, auto_mode=False)
+
         self.plotter = plotter
-        self.plotter.init_plot(self.pred_handler.REF_TIME, ['Volume (mL)'])
-        
-        self.tracking = tracking
+        self.plotter.init_plot(['Volume (mL)']) # Set label because we know what we're plotting
+
+        self.track_idx = track_idx
         self.log_file = log_file
         self.max_vol = max_vol
-        
-        self.write_header()
 
-        
-        
+        self.num_event = 0
+
+
+        self.write_header() # Write header to log file, overwritting anything there
+
+
     def get_status(self):
-        mode_dict = {True:'Enabled', False:'Disabled'}
-        try:
-            return (mode_dict[self.pid.auto_mode], self.pred_handler.labels[self.tracking], 
-                    self.pid.setpoint) + self.pid.tunings + self.pid.output_limits + \
-                    (self.max_vol, mode_dict[self.pid.proportional_on_measurement])
-        except TypeError:
-            return (mode_dict[self.pid.auto_mode], self.tracking, 
-                    self.pid.setpoint) + self.pid.tunings + self.pid.output_limits + \
-                    (self.max_vol, mode_dict[self.pid.proportional_on_measurement])
-                
+        '''
+        Get information about the PID settings
+
+        If pred_handler has labels initalized, the tracking item will be a string of
+        the corresponding label. If not, it will be track_idx.
+
+        Returns
+        -------
+        tuple
+            Item 1: string
+               info on if the PID is enabled or disabled
+
+            Item 2 : string or int
+                What value the PID is tracking. See above
+
+            Item 3 : float
+                The set point of the PID
+
+            Item 4,5,6 : float
+                The P, I, D coeffs of the PID
+
+            Item 7,8 : The lower and upder output limits of the PID
+
+            Item 9 : float
+                The max_vol setting
+
+            Item 10 : string
+                Info on if Proportional on Measurement is enabled or diabled
+        '''
+        mode_dict = {True : 'Enabled', False : 'Disabled'}
+
+
+        return (mode_dict[self.pid.auto_mode], self.get_tracking(),
+                self.pid.setpoint) + self.pid.tunings + self.pid.output_limits + \
+                (self.max_vol, mode_dict[self.pid.proportional_on_measurement])
+
     def get_tracking(self):
+        '''
+        Returns name of tracked index of pred_handler labels are init. Else trac_idx.
+
+        Returns
+        -------
+        string or int
+            String if the pred_handler returns a valid list, i.e. has been initalized.
+            Int of the tracked index otherwise
+        '''
         try:
-            return self.pred_handler.labels[self.tracking]
+            return self.pred_handler.get_labels()[self.track_idx]
         except TypeError:
-            return self.tracking
-        
+            return self.track_idx
+
     def expand_arrays(self):
+        '''
+        Expands the volume array if needed
+        '''
         self.vol = np.append(self.vol, np.zeros(3000))
-        
+
     async def trigger_PID(self):
+        '''
+        Using the most recent tracked value, get a new output from the PID and update.
+
+        Call this method once pred_handler has a new value recorded and you want to
+        get a new output from the PID based on it. Will record the output, log to the
+        log file, and update the plotter
+        '''
+        # Get most recent value of tracked index
         
-        value = self.pred_handler.pred_values[self.pred_handler.num_event - 1, 
-                                              self.tracking]
-        
-        if self.pred_handler.num_event >= self.vol.shape[0]:
-            self.expand_arrays()
+        if self.num_event < self.pred_handler.num_event: # Check if pred_handler has updated
             
-        vol = round(self.pid(value), 3)
-        
-        if vol + np.sum(self.vol) > self.max_vol:
-            vol = max(0, (self.max_vol - np.sum(self.vol)))
-        
-        self.vol[self.pred_handler.num_event - 1] = vol
-        
-        self.write_to_log(value, vol)
-        
-        await self.plotter.animate(self)
-        
+            # Average of last 4 reads 
+            value = np.average(self.pred_handler.get_values()[1][-4:, self.track_idx])
+    
+            if self.num_event >= self.vol.shape[0]:
+                self.expand_arrays()
+    
+            # Get PID output and round to 2 decimals
+            
+            if self.pid.auto_mode:
+                vol = round(self.pid(value), 2)
+            else:
+                vol = 0
+    
+            # Make output zero if the sum of outputs is greater than max_vol
+            if vol + np.sum(self.vol) > self.max_vol:
+                vol = max(0, (self.max_vol - np.sum(self.vol)))
+    
+            # Record output and increment num_event
+            self.vol[self.num_event] = vol
+            self.num_event += 1
+    
+            # Write this event to the log file
+            self.write_to_log(value, vol)
+    
+            # Wait for the plotter to update with new value
+            await self.plotter.animate(self)
+
     def last(self):
-        return self.vol[self.pred_handler.num_event - 1]
-    
+        '''
+        Returns the last value output by the PID
+        '''
+        return self.vol[self.num_event - 1]
+
     def get_values(self):
-        limit = self.pred_handler.num_event
-        return (self.pred_handler.ref_dates[:limit], np.cumsum(self.vol[:limit]))
-    
-    def update_all(self, track, setpoint, coeffs, limits, max_vol):        
-        try:
-            self.tracking = self.pred_handler.labels.index(track)
-        except AttributeError:
-            self.tracking = int(track)
-        
+        '''
+        Returns a tuple as required by classes.Plotter. Y value is cumulative sum of PID outputs.
+
+        Returns
+        -------
+        tuple (numpy.ndarray, nump.ndarray)
+            X values are the same has the pred_handler's, y_values are the cumulative sum's
+            of PID outputs stored in vol
+        '''
+        limit = self.num_event
+        return (self.pred_handler.get_values()[0][:limit], np.cumsum(self.vol[:limit]))
+
+    def update_all(self, track, setpoint, coeffs, limits, max_vol):
+        '''
+        Updates parameters of the PID.
+
+        Parameters
+        ----------
+            track : string
+                The label name or index of the value to track. Will attempt to as a
+                label name first, and will use index if pred_handler.labels has not been
+                initialized.
+
+            setpoint : float
+                New setpoint of the PID
+
+            Coeffs : tuple(float, float, float)
+                Tuple of the new P, I, D coefficients
+
+            limits : tuple(float, float)
+                Tuple of the new lower and upper output limits
+
+            max_vol : float
+                The new max_vol (output) the PID can have
+        '''
+
+        try: # See if labels is initalized
+            self.track_idx = self.pred_handler.get_labels().index(track)
+        except AttributeError: # If not, interpret as index
+            self.track_idx = int(track)
+
         self.pid.setpoint = setpoint
         self.pid.tunings = coeffs
         self.pid.output_limits = limits
         self.max_vol = max_vol
-    
+
     def write_header(self):
-        header = ['Datetime', 'Status', 'Tracking', 'Set Point', 'Prop.', 'Int', 'Deriv', 
-                  'Lower Limit', 'Upper Limit', 'Max Volume', 'Input', 'Output', 'Cumulative']
+        '''
+        Writes the following as a comma separated header, OVERWTIRING any file at log_file
+        '''
+        header = ['Datetime', 'Elapsed Time', 'Status', 'Tracking', 'Set Point',
+                  'Prop.', 'Int', 'Deriv', 'Lower Limit', 'Upper Limit', 'Max Volume',
+                  'Input', 'Output', 'Cumulative']
+
+        line = ', '.join(header)
         with open(self.log_file, 'w') as f:
-            f.write(', '.join(header))
-            f.write('\n')
-            
-    def write_to_log(self, input_val, output_val):
-        last = self.pred_handler.num_event - 1
-        date = self.plotter.x_format(self.pred_handler.ref_dates[last], None, 's')
-        values = [date] + list(self.get_status()) +\
-                    [input_val, output_val, self.get_values()[1][-1]]
-            
-        line = ', '.join([str(i) for i in values])
-        
-        with open(self.log_file, 'a') as f: 
             f.write(line)
             f.write('\n')
-        
-def main():
-    ''' Prompts user for directory inputs, then starts monitoring.
-    '''
-    root = Tk() # Create parent window and hide it
-    root.withdraw()
-    # Prompt for directory to where raw spectra will be placed
-    messagebox.showinfo('Python', 'Select the directory where raw spectra will be placed')
-    raw_path = askdirectory()
-    output_path = Path(raw_path) / 'Output' # Add output folder to that dir if it doesn't exist
-    if not output_path.exists():
-        output_path.mkdir()
-    messagebox.showinfo('Python', f'Set InStep In location to {output_path}')
 
-    # Prompt for directory where InStep will place the autosave file
-    messagebox.showinfo('Python', 'Select the directory where the predicted' +
-                        ' autosave file will be placed')
-    processed_path = askdirectory()
+    def write_to_log(self, input_val, output_val):
+        '''
+        Appends current information about the PID to the log file.
 
-    # Ask if you want to plot
-    plot_realtime = messagebox.askyesno('Python', 'Would you like to plot the' +
-                                        ' predicted results in real time?')
+        Parameters
+        ----------
+            input_val : float
+                The value that was just input into the PID
 
-    observer = Observer()   # Passes events to handler
-    raw_handler = RawHandler() # Handles raw spectra.
-    # Tell observer to give events it sees in raw_path to the raw_handler
-    observer.schedule(raw_handler, path=raw_path)
+            output_val : float
+                The value that was just output by the PID
 
-    # Pattern arg ensures that other files aren't handled, only the autosave
-    processed_handler = PredictionHandler(pattern=['*InStepAutoSave*'], plot=plot_realtime)
-    observer.schedule(processed_handler, path=processed_path, recursive=False)
-    observer.start() # Start the oberver
+        Format
+        ------
+        Comma separated values, in order:
+            Datetime of last date recorded, same format as plotter's format_abs()
 
-    # Observer and program will run indefinitely until keyboard interupt
-    try:
-        while True:
-            time.sleep(1) # Sleep for 1 second
+            Elapsed time in hours of the last date in pred_handler. NaN if plotter does
+            not have it's start_time initalized
 
-#            plt.pause(0.001)    # NECESSARY IN MAIN LOOP for plot to not freeze
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join() # Kill observer thread
+            Comma separated values of everything returned by get_status()
 
-# Call main if the script is executed
-if __name__ == '__main__':
-    main()
+            The input_val parameter
+
+            The output_val parameter
+
+            The sum of the output thus far
+        '''
+        # Get most recent date and format as datetime
+        date = self.plotter.x_format_abs(self.get_values()[0][-1], None, 's')
+
+        # Check if plotter's start time is initialzed. If not, write NaN for elasped time
+        if self.plotter.start_time.astype('int') == 0:
+            elapsed = 'NaN'
+        else:
+            # If start_time is initialized, write in plotter's format_rel() format
+            elapsed = self.plotter.x_format_rel(self.get_values()[0][-1], None)
+
+        # Combine all values into a single list
+        values = [date, elapsed] + list(self.get_status()) +\
+                    [input_val, output_val, self.get_values()[1][-1]]
+
+        # Make the list a comma separated string
+        line = ', '.join([str(i) for i in values])
+
+        with open(self.log_file, 'a') as f:
+            f.write(line)
+            f.write('\n')
