@@ -28,6 +28,7 @@ import classes
 import gui 
 import tkinter as tk
 from pathlib import Path
+from datetime import datetime
 
 
 async def run_tk(root, loop, interval=0.06):
@@ -183,6 +184,9 @@ def main():
     '''
     Excutes full program. Sets up all handlers and initailzes the gui
     '''
+    time_string = datetime.now().strftime('%Y%m%d %H:%m')
+    
+    
     # Get necessary file paths
     paths = init_paths()
 #    paths = {'instep':'C:/Users/Raman/Desktop/Instep_out', 'raw':'C:/Users/Raman/Desktop/Raman/Input'}
@@ -209,7 +213,7 @@ def main():
     # Other defaults are set, like the 200mL max volume, and that it's tracking index 0 of
     # the autosave file
     pid_handler = classes.PIDHandler(200, prediction_handler, pid_plotter, 0, 
-                                      paths['instep']+'/pid_log.txt')
+                                      paths['instep'] + f'/pid_log_{time_string}.txt')
     
     # Create the plotting_dict and pass it to the App
     plot_dict = {'Raman Plot' : prediction_plotter, 'PID Plot' : pid_plotter}

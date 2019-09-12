@@ -1,0 +1,152 @@
+# All Raman Spectra -> Pirouette
+## User Guide
+This R report generates an input file for pirouette using all raman spectra with a particular *SubjectID*. This is 
+to be used to load and visualize all spectra in pirouette at once, but it does not match to HPLC data and cannot be 
+used to build a model.
+   
+### Required Libraries
+* Rlabkey
+* glue
+   
+### Adjustable Parameters
+The adjustable paramenters are documented throughout the report, but the most essential are directly
+below:
+    
+* *raman_table* corresponds to the name of the dataset containing the raman in this study
+* *subject_id* corresponds to the SubjectID you want to generate a file from.
+
+```{r}
+raman_table = 'Raman_Transformation'
+subject_id = 'B30_35_ATCC32359_WT_1'
+```
+
+```{r, echo=FALSE}
+library(Rlabkey)
+library(glue)
+
+# Verbose
+options(echo=TRUE)
+
+base_url = labkey.url.base
+folder_path = labkey.url.path
+```
+
+# Querying 
+
+## Query Commands
+
+The sql strings are first constructed using glue. Any value inside {}
+is interpreted as a variable and is replaced in the returend string with the
+corresponding value. This allows changing of dataset names.
+
+Ensure that the column names correspond to *Field Names* not *Caption Names.*
+    
+### Raman Query
+All intensities of the specified SubjectID are pulled. Change the desired SubjectID at
+the top of the script.
+
+```{r}
+sql_raman = glue("SELECT DISTINCT {raman_table}.SubjectID,
+                 {raman_table}.FileName,
+                 {raman_table}.Intensities,
+				 {raman_table}.Run.ProcessID	
+                 FROM {raman_table}
+                 WHERE {raman_table}.SubjectID.SubjectID = '{subject_id}'")
+```
+
+### Wavenumbers Query
+This query gets the wavenumbers corresponding to the SubjectID defined at the top of the script.
+
+The raman dataset is **required** to have a *Run* property called *Wavenumbers* that is a LookUp to 
+a list. That list must have the column *WaveNumbers*, which holds the wavenumbers for that configuration.
+The list is not required to be in the current study if the raman dataset was imported from an assay, as the
+LookUp will automatically reference the orginal list in the assay.
+   
+```{r}
+# Getting wavenumbers from raman table -- should only be one when generating piroutte file.
+sql_wavenumbers = glue("SELECT DISTINCT
+                       {raman_table}.Run.Wavenumbers.WaveNumbers
+                       FROM {raman_table}
+                       WHERE {raman_table}.SubjectID.SubjectID = '{subject_id}'")
+
+```
+   
+## Execution of Queries
+
+This section executes the queries defined above and stores them in a dataframe.
+
+The datasets are assumed to be in a *study* and in the **current folder**.
+These can be changed by adjusting the *folderPath* parameter (currently set to current folder by LabKey)
+and the *schemaName* parameter (for example, from 'study' to 'assay').
+
+The *colNameOpt* parameter tells the query use Field Names in the data frame, as opposed to caption names.
+
+Finally, the data frames returned are copied because LabKey protects them internally, so this is required to use the
+data.table format below.
+   
+```{r}
+df_raman = labkey.executeSql(baseUrl = base_url, folderPath = folder_path, schemaName='study',
+                                  sql = sql_raman, colNameOpt ='fieldname')
+
+df_wavenum = labkey.executeSql(baseUrl = base_url, folderPath = folder_path, schemaName='study',
+                                    sql = sql_wavenumbers, colNameOpt = 'fieldname')
+
+```
+## Writing the Piroutte File
+
+This section is responsible for constructing the piroutte file, which is then made avialable to download
+for the user by LabKey.
+
+The order is described here:
+   
+1. The number of intensities are found, which is needed for the dimension line of the input. This is done
+by counting the commas in an wavenumber entry (because they are stored as one continuous string) and adding one.
+
+2. The first line of the file is written, which is the dimension line. It is of the format (# of intensities x # of rows)
+   
+3. The column line is written, which contains the wavenumbers
+
+4. The rows of data are looped through and each written. The *FileName* value is used as the *ElapsedTime*_*ProcessID*, which piroutte requires. Each row contains the intensities for that file.
+   
+**Note:** Anytime that you write to a file in LabKey, you must include the comment **# ${fileout:tsvfile** *(closing bracket needed but not shown)* directly above the line with the write call, for **every** write call. *fileout* specifies that you want to make a file
+available to download and *tsvfile* is the name of it that you will refer to in the write call. For example:  
+   
+   # ${fileout:tsvfile  
+   write(dimension_line, "tsvfile")
+   
+See source code for clarification, as LabKey makes the subsitutes in the report.
+                                
+```{r}
+
+# Get how many intensity entries there are, required for the input dimension size.
+# There are stored as a string, so we count the occurances of commas and add one
+intensities_len = lengths(regmatches(df_wavenum[1,1], gregexpr(",", df_wavenum[1,1]))) + 1
+
+
+# First line of file, dimension (number of intensities and rows of data)
+dimension_line = paste("#D", paste(intensities_len, nrow(df_raman), sep='x'), sep=', ')
+
+
+# EVERYTIME you want to WRITE TO A FILE, the following comment is REQUIRED on the line directly above it
+# due to how the LabKey variable subsitutor works
+
+# ${fileout:tsvfile}
+write(dimension_line, "tsvfile")
+
+# Write the column names (wavenumber and other variable names)
+column_line = paste('#C', df_wavenum[1,1], sep = ', ')
+# ${fileout:tsvfile}
+write(column_line, "tsvfile", append = T)
+
+# Write each raman reading and the corresponding variables as a row in the file
+for (i in 1:nrow(df_raman)){
+   
+    # Sample name as a combination of elapsed time and culture age
+    sample_name = paste(df_raman$ElapsedTime[i], df_raman$ProcessID[i], sep='_')
+    
+    line = paste('#S', sample_name, df_raman$Intensities[i], sep = ', ')
+    
+    # ${fileout:tsvfile}
+    write(line, "tsvfile", append = T)
+}
+```
