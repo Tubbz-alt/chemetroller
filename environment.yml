@@ -1,0 +1,15 @@
+name: pred_pid
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - matplotlib=3.1.1=py37_0
+  - numpy=1.16.4=py37h19fb1c0_0
+  - pandas=0.25.0=py37he350917_0
+  - pip=19.0.3=py37_0
+  - pyserial=3.4=py_2
+  - python=3.7.3=h8c8aaf0_0
+  - pip:
+    - simple-pid==0.2.2
+    - watchgod==0.5
+
