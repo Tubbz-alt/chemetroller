@@ -136,7 +136,8 @@ Example:
 See `classes.PredictionHandler` if this needs to change
 
 ## PID Log
-The PID log is written in the same directory as the InStepAutoSave file. Each row corresponds to a
+The PID log is written in the same directory as the InStepAutoSave file. The name of it is 
+"pid_log_datetime of program launch.txt" Each row corresponds to a
 trigger of the PID loop by the a new predicted value. It has a comma separated format of:
 
 1. Date Time
