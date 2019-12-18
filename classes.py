@@ -2,7 +2,7 @@
 """
 Created on Thu Jul 25 12:50:36 2019
 
-@author: Raman
+@author: Isaiah Lemmon isaiah.lemmon@pnnl.gov
 
 This module contains classes used to handle various events that occur.
 
@@ -621,7 +621,7 @@ class PIDHandler(object):
         Suppose pred_handler returned three columns in the second item of get_values(),
         each column corresponding to a different compound being recorded (e.g. Glucose,
         Xylose, Itaconic Acid). If track_idx was set to 0, on each call to trigger_PID(),
-        the last value of the glucose column would be fed to the PID an it's output recorded.
+        the last value of the glucose column would be fed to the PID and its output recorded.
         Therefore, the pred_handler should be updated before triggering the PID.
     '''
 

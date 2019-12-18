@@ -2,7 +2,7 @@
 """
 Created on Tue Aug 27 08:35:27 2019
 
-@author: Raman
+@author: Isaiah Lemmon isaiah.lemmon@pnnl.gov
 
 This module contains classes used to set up the gui. Many things are hardcoded
 here, but they are well documented. Take care when attempting to reorganize the
@@ -26,6 +26,8 @@ MarkTab
 """
 
 import matplotlib
+import asyncio
+from functools import partial
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
@@ -86,7 +88,7 @@ class App(tk.Tk):
         notebook.add(self.pages["Pump"], text="Pump")
         
         # Create PID Control tab
-        self.pages["PID Control"] = PIDTab(notebook, pid)
+        self.pages["PID Control"] = PIDTab(notebook, pid, self)
         notebook.add(self.pages["PID Control"], text="PID Control")
         
         # Create Mark Time tab
@@ -257,7 +259,9 @@ class PumpTab(tk.Frame):
         tk.Frame.__init__(self, parent)
         
         self.parent = parent
+        self.connection = None
         self.grid = LabelManager((10,15))
+        self.num_pumps = 0
         
         # Create button to connect to pumps at 0, 0. Calls init_pumps() on press
         self.grid.set_obj(tk.Button(self, text = 'Connect to Pumps', 
@@ -282,6 +286,10 @@ class PumpTab(tk.Frame):
         # Create a button to update the COM port option menu
         self.grid.set_obj(tk.Button(self, text = 'Update Available Ports', 
                                     command = lambda: self.update_ports()), (0, 6))
+        
+        self.grid.set_obj(tk.Button(self, text = 'Create a Virtual Pump', 
+                                    command = lambda: self.create_vpump(), state=tk.DISABLED), 
+                         (0, 7))
 
     def available_comports(self):
         '''
@@ -356,6 +364,8 @@ class PumpTab(tk.Frame):
             self.grid.get_obj((0, 0)).config(state=tk.DISABLED)
             self.grid.get_obj((0, 2)).config(state=tk.NORMAL)
             
+            
+            
             # Create header labels
             labels = ['Pump ID', 'Vol (mL/rev)', 'Total Volume\nDispensed (mL)', 'RPM',
                       'Direction', 'Connection', 'Status', 'Errors', 'Vol (mL/rev)', 
@@ -369,6 +379,13 @@ class PumpTab(tk.Frame):
             # Disable COM PORT selection
             self.grid.get_obj((0, 4)).config(state=tk.DISABLED)
             self.grid.get_obj((0, 6)).config(state=tk.DISABLED)
+            
+            self.num_pumps = len(self.connection.pump_dict)
+            
+            if self.num_pumps > 1:
+                # Add option for virtual pump
+                self.grid.get_obj((0,7)).config(state=tk.NORMAL)
+            
             
         # Catch these exceptions and raise in messagebox
         except (RuntimeError, PermissionError) as e:
@@ -390,7 +407,10 @@ class PumpTab(tk.Frame):
         if self.connection != None:
             
             # Loop through each Pump, starting on row index 2
-            for i, (ID, pump) in enumerate(self.connection.pump_dict.items(), 2):
+            # Check status of only real pumps
+            real_pumps = [(pump_id, pump) for pump_id, pump in self.connection.pump_dict.items() if "VP" not in str(pump_id)]
+            
+            for i, (ID, pump) in enumerate(real_pumps, 2):
                 # Get info about this pump
                 status = self.connection.full_info(ID)
                     
@@ -416,12 +436,14 @@ class PumpTab(tk.Frame):
                     
                     # Set update button. Calls set_pump_values and passes starting location of 
                     # the new parameters and the pump ID
+                    # Since the args to the commands are changing everytime we loop, we
+                    # need to use partial() instead of a lambda
                     self.grid.set_obj(tk.Button(self, text = 'Update', 
-                                           command=lambda: self.set_pump_values(i, j+1, pump.ID)),
-                                           (i, j+4)) 
+                                           command=partial(self.set_pump_values, i, j+1, pump.ID)),
+                                           (i, j+4))
                     
                     self.grid.set_obj(tk.Button(self, text = 'Calibrate', 
-                                           command=lambda: self.calibrate(pump.ID)),
+                                           command=partial(self.calibrate, pump.ID)),
                                            (i, j+5)) 
                 
                 # If labels are already created for this pump, just update them
@@ -473,6 +495,57 @@ class PumpTab(tk.Frame):
         # message box
         except ValueError as e:
             tk.messagebox.showinfo("Python", e)
+            
+    def create_vpump(self):
+        
+        
+        row = 2 + self.num_pumps
+        
+        vpump_id = f"VP{self.num_pumps+1}"
+        
+        self.grid.set_obj(tk.Label(self, text=vpump_id), (row, 0))
+        
+        # Create selection for first pump
+        self.grid.set_obj(tk.StringVar(self), (row, 2), grid=False)
+        self.grid.get_obj((row, 2)).set(list(self.connection.pump_dict.keys())[0])
+        
+        self.grid.set_obj(tk.OptionMenu(self, self.grid.get_obj((row, 2)),
+                                        *self.connection.pump_dict.keys()), 
+                          (row, 1), columnspan=2)
+        
+        # Create selection for second pump
+        self.grid.set_obj(tk.StringVar(self), (row, 4), grid=False)
+        self.grid.get_obj((row, 4)).set(list(self.connection.pump_dict.keys())[1])
+        
+        self.grid.set_obj(tk.OptionMenu(self, self.grid.get_obj((row, 4)),
+                                        *self.connection.pump_dict.keys()), 
+                          (row, 3), columnspan=2)
+        
+        self.grid.set_obj(tk.Label(self, text="0.45"), (row, 5))
+        
+        self.grid.set_obj(tk.Button(self, text = 'Update', 
+                                    command=partial(self.set_vpump_values, row, vpump_id)),
+                         (row, 6))
+            
+        self.grid.set_obj(tk.Scale(self, from_=0, to=100, orient=tk.HORIZONTAL), (row, 7))
+
+        self.num_pumps += 1
+        
+    def set_vpump_values(self, row, vpump_id):
+        
+        # Get pumps and ratio; turn from strings into numbers
+        pump_num_1 = int(self.grid.get_obj((row, 2)).get())
+        pump_num_2 = int(self.grid.get_obj((row, 4)).get())
+        ratio = int(self.grid.get_obj((row, 7)).get()) / 100
+        
+        # Check if this virtual pump hasn't been created yet
+        if vpump_id not in self.connection.pump_dict.keys():
+            self.connection.add_vpump(pump_num_1, pump_num_2, ratio)
+        
+        else:
+            self.connection.set_vpump(vpump_id, pump_num_1, pump_num_2, ratio)
+            
+            
     
     def disconnect_pumps(self):
         '''
@@ -484,11 +557,12 @@ class PumpTab(tk.Frame):
         self.grid.get_obj((0, 2)).config(state=tk.DISABLED)
         self.grid.get_obj((0, 4)).config(state=tk.NORMAL)
         self.grid.get_obj((0, 6)).config(state=tk.NORMAL)
+        self.grid.get_obj((0, 7)).config(state=tk.DISABLED)
         
         self.connection.close()
         
         
-    def dispense_vol(self, pump_num, vol):
+    async def dispense_vol(self, pump_num, vol):
         '''
         Dispense a volume to a pump. Helper method to catch bad inputs
         
@@ -501,12 +575,18 @@ class PumpTab(tk.Frame):
                 The volume to dispense. See pump.Pump_Serial for units
         '''
         try:
-            self.connection.dispense_vol(pump_num, vol)
+           await self.connection.dispense_vol(pump_num, vol)
         
         # Catch if there is no connection, vol/rev not assigned, or if 
         # pump_num / volume is invalid
         except (AttributeError, ValueError) as e:
             tk.messagebox.showinfo("Python", e)
+            
+    def get_pump_ids(self):
+        if self.connection is not None:
+            return self.connection.pump_dict.keys()
+        else:
+            return None
             
     
 class PIDTab(tk.Frame):
@@ -543,12 +623,14 @@ class PIDTab(tk.Frame):
             Used to know if a dropdown of label names or indicies should be displayed
     '''
     
-    def __init__(self, parent, pid_handler):
+    def __init__(self, parent, pid_handler, app):
         tk.Frame.__init__(self, parent)
         self.parent = parent
         self.pid_handler = pid_handler
+        self.app = app
         self.grid = LabelManager((4,15))
         self.tracking_labels_init = False
+
         
         # Enable and Disable buttons, similar to PumpTab
         self.grid.set_obj(tk.Button(self, text = 'Enable PID', 
@@ -561,7 +643,7 @@ class PIDTab(tk.Frame):
                                     state=tk.DISABLED), (0,2), columnspan=2)
         
         # Create Headers
-        labels = ['Status', 'Tracking\n(Index)', 'Set Point', 'Prop.', 'Int', 'Deriv', 
+        labels = ['Pump', 'Status', 'Tracking\n(Index)', 'Set Point', 'Prop.', 'Int', 'Deriv', 
                   'Lower Limit\n(mL)', 'Upper Limit\n(mL)', 'Max Cumulative\nVol (mL)',
                   'Proportional\non Measurement']
         for col, text in enumerate(labels):
@@ -589,23 +671,34 @@ class PIDTab(tk.Frame):
         to the specific labels, so the index isn't dealt with by the user.
         '''
         # If labels have not been made 
-        if self.grid.get_obj((2,0)) == 0:
+        if self.grid.get_obj((2,1)) == 0:
             # Get the status from pid_handler and create labels
-            for col, info in enumerate(self.pid_handler.get_status()):
+            for col, info in enumerate(self.pid_handler.get_status(), 1):
                 self.grid.set_obj(tk.Label(self, text=info), (2, col))
                 
-            # Create variable for tacking drop down
-            self.grid.set_obj(tk.StringVar(self), (3, 1), grid=False)
-            self.grid.get_obj((3, 1)).set(self.pid_handler.get_tracking()) # Assign to current
+            # Create variable for tracking drop down
+            self.grid.set_obj(tk.StringVar(self), (3, 2), grid=False)
+            self.grid.get_obj((3, 2)).set(self.pid_handler.get_tracking()) # Assign to current
             
-            # Create tracking drop down
-            tk.OptionMenu(self, self.grid.get_obj((3, 1)), *[0, 1, 2]).grid(row=3,
-                          column=1, padx=5, pady=5)
+            # Create tracking drop down - won't need to be updated more than once
+            tk.OptionMenu(self, self.grid.get_obj((3, 2)), *[0, 1, 2]).grid(row=3,
+                          column=2, padx=5, pady=5)
+            
+            # Create variable for pump drop down
+            self.grid.set_obj(tk.StringVar(self), (3, 0), grid=False)
+            self.grid.get_obj((3, 0)).set('') # Assign to nothing
+            
+            # Set pump label
+            self.grid.set_obj(tk.Label(self, text=self.grid.get_obj((3, 0)).get()), (2, 0))
+            
+            # Create pump drop down. Will need to be updated
+            self.pump_menu = tk.OptionMenu(self, self.grid.get_obj((3, 0)), *[''])
+            self.pump_menu.grid(row=3, column=0, padx=5, pady=5)
                 
             # Make 7 textboxes
             text_boxes = [tk.Text(self, height=1, width=6) for i in range(7)]
             # Store and assign their positions
-            for col, text in enumerate(text_boxes, 2):
+            for col, text in enumerate(text_boxes, 3):
                 self.grid.set_obj(text, (3, col))
             
             # Create button to update
@@ -613,27 +706,40 @@ class PIDTab(tk.Frame):
                               (3, col+1)) 
         
         else:
+            #update pump label
+            self.grid.get_obj((2, 0)).config(text=self.grid.get_obj((3, 0)).get())
+            
             # Update labels with pid_handler's get status
-            for i, info in enumerate(self.pid_handler.get_status()):
+            for i, info in enumerate(self.pid_handler.get_status(), 1):
                 self.grid.get_obj((2, i)).config(text=info)
+                
+            # Update pump drop down
+            if self.app.pages["Pump"].get_pump_ids() is not None:
+                pump_ids = self.app.pages["Pump"].get_pump_ids()
+                menu = self.pump_menu['menu']
+                var = self.grid.get_obj((3,0))
+                
+                menu.delete(0, 'end')
+                for name in pump_ids:
+                    menu.add_command(label=name, command=lambda name=name: var.set(name))
             
             # If the labels are not initialized yet
             if not self.tracking_labels_init:
                 # Try to set them, see if they have been initialized
                 try:
-                    tk.OptionMenu(self, self.grid.get_obj((3, 1)), 
+                    tk.OptionMenu(self, self.grid.get_obj((3, 2)), 
                                   *self.pid_handler.pred_handler.labels).grid(row=3, 
-                                 column=1, padx=5, pady=5)
-                    self.grid.get_obj((3, 1)).set(self.pid_handler.get_tracking())
-                    self.grid.get_obj((1, 1)).config(text='Tracking\n(Label)')
+                                 column=2, padx=5, pady=5)
+                    self.grid.get_obj((3, 2)).set(self.pid_handler.get_tracking())
+                    self.grid.get_obj((1, 2)).config(text='Tracking\n(Label)')
                     
                     self.tracking_labels_init = True
                     
                 # If still not initialized, pass.
                 except TypeError:
                     pass
-        
-        # Reschedule update_labels to be called in 2000ns
+            
+        # Reschedule update_labels to be called in 2000ms
         self.parent.after(2000, self.update_labels)
         
     
@@ -657,12 +763,12 @@ class PIDTab(tk.Frame):
         Hardcoded positions of each text box, please be careful if you plan on adjusting
         the layout
         '''
-        track = self.grid.get_obj((3, 1)).get()
+        track = self.grid.get_obj((3, 2)).get()
         try:
-            setpoint = float(self.grid.get_obj((3, 2)).get('1.0', tk.END))
-            coeffs = tuple([float(self.grid.get_obj((3, i)).get('1.0', tk.END)) for i in range(3, 6)])
-            limits = tuple([float(self.grid.get_obj((3, i)).get('1.0', tk.END)) for i in range(6, 8)])
-            max_vol = float(self.grid.get_obj((3, 8)).get('1.0', tk.END))
+            setpoint = float(self.grid.get_obj((3, 3)).get('1.0', tk.END))
+            coeffs = tuple([float(self.grid.get_obj((3, i)).get('1.0', tk.END)) for i in range(4, 7)])
+            limits = tuple([float(self.grid.get_obj((3, i)).get('1.0', tk.END)) for i in range(7, 9)])
+            max_vol = float(self.grid.get_obj((3, 9)).get('1.0', tk.END))
             self.pid_handler.update_all(track, setpoint, coeffs, limits, max_vol)
         except ValueError as e:
             tk.messagebox.showinfo("Python", e)
@@ -684,6 +790,16 @@ class PIDTab(tk.Frame):
         self.grid.get_obj((0, 0)).config(state=tk.NORMAL)
         self.grid.get_obj((0, 2)).config(state=tk.DISABLED)
         self.pid_handler.pid.set_auto_mode(False)
+        
+    def get_selected_pump(self):
+        pump = self.grid.get_obj((3, 0)).get() #Current pump
+        
+        try:
+            pump_id = int(pump)
+        except ValueError: # Handle if virtual pump
+            pump_id = pump
+        
+        return pump_id
         
 class MarkTab(tk.Frame):
     '''
@@ -785,13 +901,6 @@ class MarkTab(tk.Frame):
              self.mark_button.config(state=tk.NORMAL)
              self.reset_button.config(state=tk.DISABLED)
              self.time_label.config(text='')
+             
+
                 
-        
-        
-        
-
-
-
-
-
-

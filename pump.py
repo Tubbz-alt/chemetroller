@@ -2,13 +2,18 @@
 """
 Created on Wed Aug 21 12:44:09 2019
 
-@author: Raman
+@author: Isaiah Lemmon isaiah.lemmon@pnnl.gov
 
 This module creates an interface to communicate with Cole-Parmer Pumps via 
 a serial connection
 """
 
 import serial
+import time
+import re
+import asyncio
+
+response_regex = re.compile(r"\d{5}")
 
 class Pump_Serial(object):
     
@@ -133,15 +138,18 @@ class Pump_Serial(object):
         self.valid_pump(pump_num)
         
         try:
+            self.serial_dev.read(100) # Clear buffer
             self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}I', 'ascii') + b'\x0D')
-            reply = self.serial_dev.read(100).decode()[5:-1] # the 5 returned numbers
+            # the 5 returned numbers
+            reply = self.serial_dev.read(100).decode()
+            status = re.search(response_regex, reply).group(0)
             
         # if no connection return Disconnected tuple
         except serial.SerialException:
             return tuple(['Disconnected' for i in range(3)])
         
         try:
-            return tuple([self.status_dict[i][reply[i]] for i in [0,3,4]])
+            return tuple([self.status_dict[i][status[i]] for i in [0,3,4]])
         
         # Catch error where there wasn't enough time for the pump to respond
         except (IndexError, KeyError):
@@ -298,8 +306,10 @@ class Pump_Serial(object):
         '''
         Assigns local control to all pumps, then closes the serial port.
         '''
+        
         for i in self.pump_dict:
-            self.serial_dev.write(b'\x02' + bytes(f'P{i:02}L',
+            if self.valid_pump(i):
+                self.serial_dev.write(b'\x02' + bytes(f'P{i:02}L',
                                                   'ascii') + b'\x0D')
         self.serial_dev.close()
         
@@ -328,7 +338,7 @@ class Pump_Serial(object):
         return self.serial_dev.read(16).decode()
 
             
-    def dispense_vol(self, pump_num, vol):
+    async def dispense_vol(self, pump_num, vol):
         '''
         Dispense a volume in mL from a specified pump.
         
@@ -343,19 +353,66 @@ class Pump_Serial(object):
             vol : float
                 The volume to dispense in mL
         '''
-        revs = self.pump_dict[pump_num].vol_to_rev(vol)
-        self.assign_rev(pump_num, revs)
+        # Handle virtual pump case
+        if type(self.pump_dict[pump_num]) == VPump:
+            ratio = self.pump_dict[pump_num].ratio
+            
+            pump_1 = self.pump_dict[pump_num].pump_1
+            pump_2 = self.pump_dict[pump_num].pump_2
+            
+            # Calculate revolutions based on the ratio to each pump
+            rev_1 = pump_1.vol_to_rev(vol * ratio)
+            rev_2 = pump_2.vol_to_rev(vol * (1 - ratio))
+            
+            # Run revolution of first pump and run
+            self.assign_rev(pump_1.ID, rev_1, run=True)
+            
+            # Assign revolution of second pump, but don't run right away
+            self.assign_rev(pump_2.ID, rev_2, run=False)
+            
+            # Wait until first pump has finished
+            while self.check_status(pump_1.ID)[1] == 'Running':
+                await asyncio.sleep(1)
+            
+            # Run second pump
+            self.run_pump(pump_2.ID)
+            
+        else:
+            revs = self.pump_dict[pump_num].vol_to_rev(vol)
+            self.assign_rev(pump_num, revs)
        
     def valid_pump(self, pump_num):
-        ''' Checks if this pump is valid. Raises ValueError if not.'''
+        ''' Checks if this pump is valid and real. Raises ValueError if not.'''
         if pump_num not in self.pump_dict:
             raise ValueError('Not a valid pump ID')
+            
+        if type(self.pump_dict[pump_num]) == VPump:
+            raise ValueError('Must not be a virtual pump')
             
     def set_vol_per_rev(self, pump_num, vol_per_rev):
         '''
         Sets the vol_per_rev attribute of the specified pump.
         '''
         self.pump_dict[pump_num].set_vol_per_rev(vol_per_rev)
+        
+    def add_vpump(self, pump_num_1, pump_num_2, ratio):
+        self.valid_pump(pump_num_1)
+        self.valid_pump(pump_num_2)
+        
+        num_pumps = len(self.pump_dict)
+        
+        key = f"VP{num_pumps + 1}"
+        self.pump_dict[key] = VPump(self.pump_dict[pump_num_1], 
+                                              self.pump_dict[pump_num_2], ratio)
+        
+    def set_vpump(self, vpump_id, pump_num_1, pump_num_2, ratio):
+        if type(self.pump_dict[vpump_id]) is not VPump:
+            raise ValueError("Passed ID must refer to a virtual pump")
+        
+        self.pump_dict[vpump_id].pump_1 = self.pump_dict[pump_num_1]
+        self.pump_dict[vpump_id].pump_2 = self.pump_dict[pump_num_2]
+        self.pump_dict[vpump_id].ratio = ratio
+        
             
 class Pump(object):
     '''
@@ -450,9 +507,13 @@ class Pump(object):
         if self.vol_per_rev == None:
             raise AttributeError("Volume (mL) per rev for this pump has not been assigned")
         return vol / self.vol_per_rev 
-        
-        
-        
-        
     
+        
+        
+class VPump(object):
     
+    def __init__(self, pump_1, pump_2, ratio):
+        self.pump_1 = pump_1
+        self.pump_2 = pump_2
+        self.ratio = ratio # ratio of pump 1 to 2
+        

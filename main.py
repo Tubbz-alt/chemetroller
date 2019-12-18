@@ -2,7 +2,7 @@
 """
 Created on Tue Sep  3 12:31:03 2019
 
-@author: Raman
+@author: Isaiah Lemmon isaiah.lemmon@pnnl.gov
 
 This is the main file to be execeuted, tying all the of the other modules together
 and creating the gui. Some important things are hardcoded here:
@@ -112,7 +112,10 @@ async def instep_watcher(path, regex, pred_handler, pid_handler, app):
             await pid_handler.trigger_PID() # Trigger the PID with the new values
             vol = pid_handler.last() # Get the most recent PID output
             
-            app.pages["Pump"].dispense_vol(1, vol) # Dispense that to Pump 1
+            selected_pump = app.pages["PID Control"].get_selected_pump()
+            
+            if selected_pump != '':
+                await app.pages["Pump"].dispense_vol(selected_pump, vol) # Dispense that to the pump
             
             app.update_plots() # Update the plots
             
@@ -188,8 +191,8 @@ def main():
     
     
     # Get necessary file paths
-    paths = init_paths()
-#    paths = {'instep':'C:/Users/Raman/Desktop/Instep_out', 'raw':'C:/Users/Raman/Desktop/Raman/Input'}
+#    paths = init_paths()
+    paths = {'instep':'C:/Users/Raman/Desktop/Instep_out', 'raw':'C:/Users/Raman/Desktop/Raman/Input'}
     
     raman_regex = r'.+\.txt' # Raman file is any that ends in .txt
     
@@ -212,6 +215,7 @@ def main():
     # the InStep autosave file.
     # Other defaults are set, like the 200mL max volume, and that it's tracking index 0 of
     # the autosave file
+    
     pid_handler = classes.PIDHandler(200, prediction_handler, pid_plotter, 0, 
                                       paths['instep'] + f'/pid_log_{time_string}.txt')
     
