@@ -308,7 +308,7 @@ class PredictionHandler(object):
                                      np.zeros((3000, self.pred_values.shape[1])),
                                      axis=0)
         self.dates = np.append(self.dates, np.zeros(3000, dtype='datetime64[s]'))
-        self.ref_dates = np.append(self.ref_dates, np.zeros(3000))
+        self.ref_dates = np.append(self.ref_dates, np.zeros(3000, dtype='timedelta64[s]'))
 
     def get_values(self):
         '''

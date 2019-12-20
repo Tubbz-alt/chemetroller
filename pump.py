@@ -143,11 +143,19 @@ class Pump_Serial(object):
             # the 5 returned numbers
             time.sleep(0.02)
             reply = self.serial_dev.read(100).decode()
-            status = re.search(response_regex, reply).group(0)
+    
             
         # if no connection return Disconnected tuple
         except serial.SerialException:
             return tuple(['Disconnected' for i in range(3)])
+        
+        match = re.search(response_regex, reply)
+        
+        if match is None:
+            # If the response wasn't caught fully, try again recursively
+            return self.valid_pump(pump_num)
+        
+        status = match.group(0)
         
         try:
             return tuple([self.status_dict[i][status[i]] for i in [0,3,4]])
