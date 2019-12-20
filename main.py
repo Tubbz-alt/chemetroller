@@ -64,7 +64,7 @@ async def run_tk(root, loop, interval=0.06):
         else:
             loop.stop()
 
-async def instep_watcher(path, regex, pred_handler, pid_handler, app):
+async def instep_watcher(path, regex, pred_handler, pid_handler, app, log_file):
     '''
     Async file watcher for InStep autosave files.
     
@@ -116,6 +116,12 @@ async def instep_watcher(path, regex, pred_handler, pid_handler, app):
             
             if selected_pump != '':
                 await app.pages["Pump"].dispense_vol(selected_pump, vol) # Dispense that to the pump
+                
+            ratio = app.pages["Pump"].get_ratio(selected_pump)
+            with open(log_file, 'a') as f:
+                line = ', '.join([str(selected_pump), str(ratio)])
+                f.write(line)
+                f.write('\n')
             
             app.update_plots() # Update the plots
             
@@ -187,7 +193,7 @@ def main():
     '''
     Excutes full program. Sets up all handlers and initailzes the gui
     '''
-    time_string = datetime.now().strftime('%Y%m%d %H:%m')
+    time_string = datetime.now().strftime('%Y%m%d %H%M')
     
     
     # Get necessary file paths
@@ -216,8 +222,9 @@ def main():
     # Other defaults are set, like the 200mL max volume, and that it's tracking index 0 of
     # the autosave file
     
+    paths['log_file'] = paths['instep'] + f'/pid_log_{time_string}.txt' # Where to save PID output
     pid_handler = classes.PIDHandler(200, prediction_handler, pid_plotter, 0, 
-                                      paths['instep'] + f'/pid_log_{time_string}.txt')
+                                      paths['log_file'])
     
     # Create the plotting_dict and pass it to the App
     plot_dict = {'Raman Plot' : prediction_plotter, 'PID Plot' : pid_plotter}
@@ -230,7 +237,7 @@ def main():
     loop.create_task(run_tk(app, loop))
     loop.create_task(raw_watcher(paths['raw'], raman_regex, raw_handler))
     loop.create_task(instep_watcher(paths['instep'], instep_regex, prediction_handler,
-                                    pid_handler, app))
+                                    pid_handler, app, paths['log_file']))
     
     # Run the loop forever
     loop.run_forever()

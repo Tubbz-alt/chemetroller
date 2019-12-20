@@ -141,6 +141,7 @@ class Pump_Serial(object):
             self.serial_dev.read(100) # Clear buffer
             self.serial_dev.write(b'\x02' + bytes(f'P{pump_num:02}I', 'ascii') + b'\x0D')
             # the 5 returned numbers
+            time.sleep(0.02)
             reply = self.serial_dev.read(100).decode()
             status = re.search(response_regex, reply).group(0)
             
@@ -412,6 +413,16 @@ class Pump_Serial(object):
         self.pump_dict[vpump_id].pump_1 = self.pump_dict[pump_num_1]
         self.pump_dict[vpump_id].pump_2 = self.pump_dict[pump_num_2]
         self.pump_dict[vpump_id].ratio = ratio
+        
+    def get_ratio(self, pump_id):
+        try: 
+            self.valid_pump(pump_id)
+            return 1
+        except ValueError:
+            if pump_id in self.pump_dict:
+                return self.pump_dict[pump_id].ratio
+            else:
+                raise ValueError("Not a valid Pump ID")
         
             
 class Pump(object):

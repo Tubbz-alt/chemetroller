@@ -802,7 +802,7 @@ class PIDHandler(object):
         '''
         header = ['Datetime', 'Elapsed Time', 'Status', 'Tracking', 'Set Point',
                   'Prop.', 'Int', 'Deriv', 'Lower Limit', 'Upper Limit', 'Max Volume',
-                  'Input', 'Output', 'Cumulative']
+                  'Prop on Meas', 'Input', 'Output', 'Cumulative', 'Pump ID', 'Ratio (P1:P2)']
 
         line = ', '.join(header)
         with open(self.log_file, 'w') as f:
@@ -856,4 +856,5 @@ class PIDHandler(object):
 
         with open(self.log_file, 'a') as f:
             f.write(line)
-            f.write('\n')
+            f.write(", ")
+#            f.write('\n')
