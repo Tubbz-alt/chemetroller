@@ -505,29 +505,32 @@ class PumpTab(tk.Frame):
         
         self.grid.set_obj(tk.Label(self, text=vpump_id), (row, 0))
         
+        available_pumps = list(self.connection.pump_dict.keys())
+        
         # Create selection for first pump
         self.grid.set_obj(tk.StringVar(self), (row, 2), grid=False)
-        self.grid.get_obj((row, 2)).set(list(self.connection.pump_dict.keys())[0])
+        self.grid.get_obj((row, 2)).set(available_pumps[0])
         
         self.grid.set_obj(tk.OptionMenu(self, self.grid.get_obj((row, 2)),
-                                        *self.connection.pump_dict.keys()), 
+                                        *available_pumps), 
                           (row, 1), columnspan=2)
         
         # Create selection for second pump
         self.grid.set_obj(tk.StringVar(self), (row, 4), grid=False)
-        self.grid.get_obj((row, 4)).set(list(self.connection.pump_dict.keys())[1])
+        self.grid.get_obj((row, 4)).set(available_pumps[1])
         
         self.grid.set_obj(tk.OptionMenu(self, self.grid.get_obj((row, 4)),
-                                        *self.connection.pump_dict.keys()), 
+                                        *available_pumps), 
                           (row, 3), columnspan=2)
         
-        self.grid.set_obj(tk.Label(self, text="0.45"), (row, 5))
+        self.grid.set_obj(tk.Label(self, text="Ratio: N/A"), (row, 5))
         
         self.grid.set_obj(tk.Button(self, text = 'Update', 
                                     command=partial(self.set_vpump_values, row, vpump_id)),
                          (row, 6))
             
-        self.grid.set_obj(tk.Scale(self, from_=0, to=100, orient=tk.HORIZONTAL), (row, 7))
+        self.grid.set_obj(tk.Scale(self, from_=0, to=100, orient=tk.HORIZONTAL), 
+                          (row, 7), columnspan=2)
 
         self.num_pumps += 1
         
@@ -536,7 +539,11 @@ class PumpTab(tk.Frame):
         # Get pumps and ratio; turn from strings into numbers
         pump_num_1 = int(self.grid.get_obj((row, 2)).get())
         pump_num_2 = int(self.grid.get_obj((row, 4)).get())
-        ratio = int(self.grid.get_obj((row, 7)).get()) / 100
+        ratio = int(self.grid.get_obj((row, 7)).get())
+        
+        self.grid.get_obj((row, 5)).config(text=f"Ratio (Pump 1:Pump 2): {ratio}")
+        
+        ratio /= 100
         
         # Check if this virtual pump hasn't been created yet
         if vpump_id not in self.connection.pump_dict.keys():
@@ -545,7 +552,7 @@ class PumpTab(tk.Frame):
         else:
             self.connection.set_vpump(vpump_id, pump_num_1, pump_num_2, ratio)
             
-            
+        
     
     def disconnect_pumps(self):
         '''
@@ -585,6 +592,12 @@ class PumpTab(tk.Frame):
     def get_pump_ids(self):
         if self.connection is not None:
             return self.connection.pump_dict.keys()
+        else:
+            return None
+        
+    def get_ratio(self, pump_id):
+        if self.connection is not None:
+            return self.connection.get_ratio(pump_id)
         else:
             return None
             
@@ -650,7 +663,7 @@ class PIDTab(tk.Frame):
             self.grid.set_obj(tk.Label(self, text=text), (1, col))
             
         # Create prop-on-meas button
-        self.grid.set_obj(tk.Button(self, text='Enable Proportional\non Measurement',
+        self.grid.set_obj(tk.Button(self, text='Disable Proportional\non Measurement',
                                     command=lambda: self.proportional_on()),
                           (0, col), columnspan=2)
             
@@ -747,7 +760,7 @@ class PIDTab(tk.Frame):
         '''
         Alternate prop. on measurement state and button state on call
         '''
-        button = self.grid.get_obj((0,9))
+        button = self.grid.get_obj((0,10))
         prop = self.pid_handler.pid.proportional_on_measurement
         if prop:
             button.config(text='Enable Proportional\non Measurement')
@@ -779,9 +792,15 @@ class PIDTab(tk.Frame):
         '''
         Enable the PID loop, allowing values to be output and alternate button states
         '''
-        self.grid.get_obj((0, 0)).config(state=tk.DISABLED)
-        self.grid.get_obj((0, 2)).config(state=tk.NORMAL)
-        self.pid_handler.pid.set_auto_mode(True)
+        pump = self.grid.get_obj((3, 0)).get() #Current pump
+        
+        if pump == '':
+            tk.messagebox.showinfo("Python", "Pump not assigned")
+        
+        else:
+            self.grid.get_obj((0, 0)).config(state=tk.DISABLED)
+            self.grid.get_obj((0, 2)).config(state=tk.NORMAL)
+            self.pid_handler.pid.set_auto_mode(True)
         
     def disable_pid(self):
         '''
