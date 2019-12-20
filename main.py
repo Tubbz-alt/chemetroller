@@ -116,8 +116,11 @@ async def instep_watcher(path, regex, pred_handler, pid_handler, app, log_file):
             
             if selected_pump != '':
                 await app.pages["Pump"].dispense_vol(selected_pump, vol) # Dispense that to the pump
+                ratio = app.pages["Pump"].get_ratio(selected_pump)
                 
-            ratio = app.pages["Pump"].get_ratio(selected_pump)
+            else: 
+                ratio = "N/A"
+            
             with open(log_file, 'a') as f:
                 line = ', '.join([str(selected_pump), str(ratio)])
                 f.write(line)
@@ -197,8 +200,8 @@ def main():
     
     
     # Get necessary file paths
-#    paths = init_paths()
-    paths = {'instep':'C:/Users/Raman/Desktop/Instep_out', 'raw':'C:/Users/Raman/Desktop/Raman/Input'}
+    paths = init_paths()
+#    paths = {'instep':'C:/Users/Raman/Desktop/Instep_out', 'raw':'C:/Users/Raman/Desktop/Raman/Input'}
     
     raman_regex = r'.+\.txt' # Raman file is any that ends in .txt
     
